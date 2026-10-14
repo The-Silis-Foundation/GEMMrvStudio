@@ -432,11 +432,11 @@ class ProfessionalGEMMDashboard:
                              relief="solid", bd=1, padx=10, pady=2, cursor="hand2")
         btn_kill.pack(side="left", padx=4)
 
-        # Row B: Firmware Flasher Section
+        # Row B: Send File / Firmware Binary Section
         row_flash = tk.Frame(ctrl_card, bg="#ffffff")
         row_flash.pack(fill="x", padx=15, pady=6)
 
-        tk.Label(row_flash, text="Firmware Binary:", font=("Segoe UI", 9, "bold"), fg="#2d3748", bg="#ffffff").pack(side="left")
+        tk.Label(row_flash, text="Send File:", font=("Segoe UI", 9, "bold"), fg="#2d3748", bg="#ffffff").pack(side="left")
         self.combo_bins = ttk.Combobox(row_flash, textvariable=self.bin_path_var, width=42, font=("Segoe UI", 9))
         self.combo_bins.pack(side="left", padx=(6, 6))
 
@@ -444,7 +444,7 @@ class ProfessionalGEMMDashboard:
                                    font=("Segoe UI", 8), bg="#edf2f7", fg="#2d3748", relief="solid", bd=1, padx=6, pady=2)
         btn_browse_bin.pack(side="left", padx=(0, 14))
 
-        self.btn_flash = tk.Button(row_flash, text="Program Board (PROG Mode)", command=self.start_program_flow,
+        self.btn_flash = tk.Button(row_flash, text="Send File", command=self.start_program_flow,
                                    font=("Segoe UI", 9, "bold"), bg="#2b6cb0", fg="#ffffff", activebackground="#2c5282",
                                    relief="solid", bd=1, padx=14, pady=3, cursor="hand2")
         self.btn_flash.pack(side="left", padx=4)
@@ -1150,82 +1150,99 @@ int main(void) {{
             self.root.after(0, lambda: self.btn_flash.config(state="normal"))
             return
 
-        # Handshake with NEORV32 bootloader
-        bootloader_ready = False
-        self.root.after(0, lambda: self.log("[PROGRAMMER] Sending reset / ping sequences...\n", "cmd"))
-
-        for _ in range(5):
-            flash_ser.write(b"\r\n")
-            flash_ser.flush()
-            time.sleep(0.1)
-            resp = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
-            if "CMD:>" in resp or "neorv32" in resp.lower() or "bootloader" in resp.lower():
-                bootloader_ready = True
-                break
-
-        if not bootloader_ready:
-            self.root.after(0, lambda: self.log("[PROGRAMMER] Prompting user to reset board...\n", "warn"))
-            self.root.after(0, lambda: self.lbl_action_status.config(text="Press CPU_RESET (PROG) on FPGA Board now!", fg="#b7791f"))
-            t_end = time.time() + 8.0
-            while time.time() < t_end:
-                flash_ser.write(b"\r\n")
-                time.sleep(0.2)
-                resp = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
-                if "CMD:>" in resp:
-                    bootloader_ready = True
-                    break
-
-        self.root.after(0, lambda: self.lbl_action_status.config(text="Bootloader detected. Uploading firmware...", fg="#2b6cb0"))
-        self.root.after(0, lambda: self.log("[PROGRAMMER] Bootloader detected. Uploading binary image...\n", "sys"))
+        # Directly send binary file without prompting for reset button
+        self.root.after(0, lambda: self.lbl_action_status.config(text="Sending file...", fg="#2b6cb0"))
+        self.root.after(0, lambda: self.log(f"[SEND FILE] Sending {os.path.basename(bin_path)} over {port}...\n", "sys"))
 
         try:
             with open(bin_path, "rb") as f:
                 data = f.read()
 
             file_size = len(data)
-            # Calculate 32-bit sum checksum of raw binary payload
-            import struct
-            words = [struct.unpack("<I", data[i:i+4])[0] for i in range(16, len(data), 4)]
-            chk32 = sum(words) & 0xFFFFFFFF
-            self.root.after(0, lambda: self.log(f"[PROGRAMMER] File: {os.path.basename(bin_path)} ({file_size} bytes, Data Checksum: 0x{chk32:08X})\n", "cmd"))
+            self.root.after(0, lambda: self.log(f"[SEND FILE] Payload size: {file_size} bytes\n", "cmd"))
 
+            # Step 1: Drain any stale input and wake up / abort bootloader countdown
             flash_ser.reset_input_buffer()
-            flash_ser.write(b"u")
-            time.sleep(0.5)
-            ack_u = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
-            self.root.after(0, lambda: self.log(f"[BOOTLOADER] {ack_u.strip()}\n", "cmd"))
-
-            # Transmit binary stream
-            flash_ser.write(data)
+            flash_ser.write(b" \r\n")
             flash_ser.flush()
+            time.sleep(0.2)
 
-            # Wait and read bootloader verification result
-            time.sleep(1.2)
-            boot_resp = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
+            # Step 2: Read response and wait for CMD:> prompt or Awaiting
+            resp = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
+            if resp:
+                self.root.after(0, lambda: self.log(f"[BOOTLOADER] {resp.strip()}\n", "cmd"))
 
-            if "ERROR_CHECKSUM" in boot_resp:
-                self.root.after(0, lambda: self.log(f"[BOOTLOADER ERROR] CRC/Checksum mismatch on FPGA side: {boot_resp}\n", "err"))
-                self.root.after(0, lambda: self.lbl_action_status.config(text="Upload failed: Checksum Mismatch!", fg="#c53030"))
-                self.is_flashing = False
-                self.root.after(0, lambda: self.btn_flash.config(state="normal"))
-                return
-            elif "ERROR" in boot_resp:
-                self.root.after(0, lambda: self.log(f"[BOOTLOADER ERROR] Upload rejected by bootloader: {boot_resp}\n", "err"))
-                self.root.after(0, lambda: self.lbl_action_status.config(text="Upload rejected by bootloader!", fg="#c53030"))
-                self.is_flashing = False
-                self.root.after(0, lambda: self.btn_flash.config(state="normal"))
-                return
+            # If not yet at prompt or awaiting, retry a couple times
+            if "CMD:>" not in resp and "awaiting" not in resp.lower():
+                for _ in range(5):
+                    flash_ser.write(b" \r\n")
+                    flash_ser.flush()
+                    time.sleep(0.2)
+                    r = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
+                    if r:
+                        resp += r
+                        self.root.after(0, lambda: self.log(f"[BOOTLOADER] {r.strip()}\n", "cmd"))
+                    if "CMD:>" in resp or "awaiting" in resp.lower():
+                        break
+
+            # Step 3: If at CMD:>, send 'u' to request upload
+            if "awaiting" not in resp.lower():
+                self.root.after(0, lambda: self.log("[BOOTLOADER] Sending 'u' command...\n", "cmd"))
+                flash_ser.reset_input_buffer()
+                flash_ser.write(b"u")
+                flash_ser.flush()
+                t_wait = time.time() + 1.2
+                while time.time() < t_wait:
+                    time.sleep(0.1)
+                    r = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
+                    if r:
+                        resp += r
+                        self.root.after(0, lambda: self.log(r, "cmd"))
+                    if "awaiting" in resp.lower():
+                        break
+
+            # Step 4: Transmit binary stream directly in chunks
+            self.root.after(0, lambda: self.log("[SEND FILE] Transmitting binary image...\n", "sys"))
+            flash_ser.reset_input_buffer()
+            CHUNK_SIZE = 256
+            for offset in range(0, file_size, CHUNK_SIZE):
+                chunk = data[offset:offset + CHUNK_SIZE]
+                flash_ser.write(chunk)
+                flash_ser.flush()
+                time.sleep(0.01)
+
+            # Step 5: Wait for bootloader verification response ("OK" or "ERROR")
+            t_wait = time.time() + 3.0
+            upload_ok = False
+            post_resp = ""
+            while time.time() < t_wait:
+                time.sleep(0.1)
+                r = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
+                if r:
+                    post_resp += r
+                    self.root.after(0, lambda: self.log(r, "cmd"))
+                if "OK" in post_resp:
+                    upload_ok = True
+                    break
+                if "ERROR" in post_resp:
+                    break
+
+            if upload_ok:
+                self.root.after(0, lambda: self.log("\n[BOOTLOADER] Firmware upload OK! Starting executable ('e')...\n", "success"))
+                time.sleep(0.1)
+                flash_ser.write(b"e")
+                flash_ser.flush()
+                time.sleep(0.4)
+                boot_out = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
+                if boot_out:
+                    self.root.after(0, lambda: self.log(boot_out, "cmd"))
+                self.ser = flash_ser
+                self.root.after(0, lambda: self.lbl_status_badge.config(text=f"CONNECTED ({port})", fg="#2f855a", bg="#f0fff4"))
+                self.root.after(0, lambda: self.lbl_action_status.config(text=f"Sent {file_size} bytes - RUNNING", fg="#2f855a"))
+                self.root.after(0, lambda: self.log(f"[SEND FILE SUCCESS] Sent {file_size} bytes successfully.\n\n", "success"))
             else:
-                self.root.after(0, lambda: self.log(f"[BOOTLOADER VERIFIED] {boot_resp.strip() or 'OK (Image Verified)'}\n", "success"))
-
-            # Boot application
-            flash_ser.write(b"e")
-            time.sleep(0.3)
-
-            self.ser = flash_ser
-            self.root.after(0, lambda: self.lbl_status_badge.config(text=f"CONNECTED ({port})", fg="#2f855a", bg="#f0fff4"))
-            self.root.after(0, lambda: self.lbl_action_status.config(text=f"Flashed {file_size} bytes. Verified OK.", fg="#2f855a"))
-            self.root.after(0, lambda: self.log(f"[PROGRAMMER SUCCESS] Flashed & Verified {file_size} bytes. Application active.\n\n", "success"))
+                self.root.after(0, lambda: self.lbl_action_status.config(text="Upload failed or not acknowledged.", fg="#c53030"))
+                self.root.after(0, lambda: self.log(f"\n[PROGRAMMER ERROR] Bootloader did not report OK: {post_resp.strip()}\n", "err"))
 
         except Exception as e:
             if flash_ser:
@@ -1233,8 +1250,8 @@ int main(void) {{
                     flash_ser.close()
                 except Exception:
                     pass
-            self.root.after(0, lambda: self.lbl_action_status.config(text=f"Flashing failed: {e}", fg="#c53030"))
-            self.root.after(0, lambda: self.log(f"[PROGRAMMER ERROR] Flashing failed: {e}\n", "err"))
+            self.root.after(0, lambda: self.lbl_action_status.config(text=f"Send failed: {e}", fg="#c53030"))
+            self.root.after(0, lambda: self.log(f"[SEND FILE ERROR] Send failed: {e}\n", "err"))
 
         self.is_flashing = False
         self.root.after(0, lambda: self.btn_flash.config(state="normal"))
