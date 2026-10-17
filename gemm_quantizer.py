@@ -38,7 +38,7 @@ class GEMMQuantizer:
         max_val = float(np.max(np.abs(arr)))
         target_dtype = np.int16 if target_bits == 16 else np.int8
 
-        if max_val == 0.0:
+        if max_val < 1e-12:
             scale = 1.0
             q_tensor = np.zeros_like(arr, dtype=target_dtype)
             return q_tensor, scale, (1, 0)

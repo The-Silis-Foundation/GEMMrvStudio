@@ -242,12 +242,14 @@ void gemmrv_nn_attention_s8(
 
         // Step 3: Attention * V (Systolic acceleration: [1 x seq_len] * [seq_len x d_v] -> [1 x d_v])
         gemmrv_mat a_row = GEMMRV_MAT(attn_weights, 1, actual_seq, stride_s);
-        gemmrv_mat v_mat = GEMMRV_MAT(V, actual_seq, d_v, stride_v);
-        gemmrv_mat_out out_mat = GEMMRV_MAT_OUT(out_accum, 1, d_v, stride_v);
+        #define MAX_ATTN_DV 128
+        int actual_dv = (d_v > MAX_ATTN_DV) ? MAX_ATTN_DV : d_v;
+        gemmrv_mat v_mat = GEMMRV_MAT(V, actual_seq, actual_dv, stride_v);
+        gemmrv_mat_out out_mat = GEMMRV_MAT_OUT(out_accum, 1, actual_dv, stride_v);
 
         gemmrv_mult(&a_row, &v_mat, &out_mat);
 
-        for (int k = 0; k < d_v; k++) {
+        for (int k = 0; k < actual_dv; k++) {
             out[i * stride_v + k] = saturate_s8(out_accum[k] >> 7);
         }
     }
@@ -266,6 +268,7 @@ void gemmrv_nn_maxpool2d_s8(
     int pool_h, int pool_w,
     int stride_h, int stride_w
 ) {
+    if (in_h < pool_h || in_w < pool_w) return;
     int out_h = (in_h - pool_h) / stride_h + 1;
     int out_w = (in_w - pool_w) / stride_w + 1;
 

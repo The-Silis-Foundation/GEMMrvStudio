@@ -358,32 +358,51 @@ class GEMMDevWorkbench(QtWidgets.QWidget):
 
             if fpath.endswith(".npy"):
                 arr = np.load(fpath)
-                if arr.ndim == 1:
-                    arr = arr.reshape(1, -1)
-                q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(arr, target_bits=target_bits)
-                padded, orig_shape, stride = GEMMQuantizer.pad_to_systolic_stride(q_arr)
-                tensors[name_base] = {
-                    "data": padded,
-                    "original_shape": orig_shape,
-                    "stride": stride,
-                    "quant_mult": mult,
-                    "quant_shift": shift
-                }
-            elif fpath.endswith(".npz"):
-                archive = np.load(fpath)
-                for k in archive.files:
-                    arr = archive[k]
+                is_bias = "bias" in name_base.lower()
+                if is_bias:
+                    q_arr = arr.astype(np.int32)
+                    tensors[name_base] = {
+                        "data": q_arr,
+                        "original_shape": q_arr.shape,
+                        "stride": q_arr.shape[-1] if q_arr.ndim > 1 else len(q_arr)
+                    }
+                else:
                     if arr.ndim == 1:
                         arr = arr.reshape(1, -1)
                     q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(arr, target_bits=target_bits)
                     padded, orig_shape, stride = GEMMQuantizer.pad_to_systolic_stride(q_arr)
-                    tensors[f"{name_base}_{k}"] = {
+                    tensors[name_base] = {
                         "data": padded,
                         "original_shape": orig_shape,
                         "stride": stride,
                         "quant_mult": mult,
                         "quant_shift": shift
                     }
+            elif fpath.endswith(".npz"):
+                archive = np.load(fpath)
+                for k in archive.files:
+                    arr = archive[k]
+                    tensor_key = f"{name_base}_{k}"
+                    is_bias = "bias" in k.lower()
+                    if is_bias:
+                        q_arr = arr.astype(np.int32)
+                        tensors[tensor_key] = {
+                            "data": q_arr,
+                            "original_shape": q_arr.shape,
+                            "stride": q_arr.shape[-1] if q_arr.ndim > 1 else len(q_arr)
+                        }
+                    else:
+                        if arr.ndim == 1:
+                            arr = arr.reshape(1, -1)
+                        q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(arr, target_bits=target_bits)
+                        padded, orig_shape, stride = GEMMQuantizer.pad_to_systolic_stride(q_arr)
+                        tensors[tensor_key] = {
+                            "data": padded,
+                            "original_shape": orig_shape,
+                            "stride": stride,
+                            "quant_mult": mult,
+                            "quant_shift": shift
+                        }
             elif fpath.endswith(".tflite"):
                 info = TFLiteDecomposer.inspect_tflite(fpath)
                 self.txt_quant_preview.setPlainText(

@@ -70,7 +70,7 @@ void gemmrv_nn_dense_s8(
  * 
  * @param in           Input image / activation tensor [H x W x C_in], aligned(4)
  * @param out          Output feature map [H_out x W_out x C_out], aligned(4)
- * @param weights      Filter kernels [C_out x (K_h * K_w * C_in)], aligned(4)
+ * @param weights      Filter kernels [(kernel_h * kernel_w * in_c) x out_c], aligned(4)
  * @param bias         Per-channel int32 bias [C_out] (optional, can be NULL)
  * @param in_h         Input height
  * @param in_w         Input width
