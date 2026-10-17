@@ -29,72 +29,80 @@ static int8_t output_logits[OUTPUT_STRIDE] __attribute__((aligned(4)));
 
 int main(void) {
     // 1. Initialize SoC Runtime Environment & UART
-    neorv32_rte_setup();
+    neorv32_gpio_port_set(0x01);
     neorv32_uart0_setup(19200, 0);
-
-    neorv32_uart0_printf("\n========================================\n");
-    neorv32_uart0_printf("   GEMMrv32 SoC Neural Inference Test   \n");
-    neorv32_uart0_printf("========================================\n");
+    neorv32_gpio_port_set(0x03);
 
     // 2. Initialize Systolic Array CFS Coprocessor
     if (!gemmrv_nn_init()) {
         neorv32_uart0_printf("[ERROR] Systolic CFS Coprocessor not detected!\n");
+        neorv32_gpio_port_set(0xFF);
         return 1;
     }
-    neorv32_uart0_printf("[STATUS] 8x8 Systolic Coprocessor Initialized.\n");
+    neorv32_gpio_port_set(0x07);
 
-    // 3. Prepare synthetic test input vector (32 features)
-    for (int i = 0; i < INPUT_DIM; i++) {
-        input_activations[i] = (int8_t)((i * 7) % 63 - 31);
+    uint32_t clk = neorv32_sysinfo_get_clk();
+    uint32_t frame_count = 0;
+
+    while (1) {
+        neorv32_uart0_printf("\n========================================\n");
+        neorv32_uart0_printf("   GEMMrv32 SoC Neural Inference #%u    \n", ++frame_count);
+        neorv32_uart0_printf("========================================\n");
+
+        // 3. Prepare synthetic test input vector (32 features)
+        for (int i = 0; i < INPUT_DIM; i++) {
+            input_activations[i] = (int8_t)(((i + frame_count) * 7) % 63 - 31);
+        }
+
+        neorv32_gpio_port_set(0x0F);
+        uint32_t start_cycles = neorv32_cpu_csr_read(CSR_MCYCLE);
+
+        // 4. LAYER 1: Dense (32 -> 16) with Fused ReLU
+        gemmrv_nn_dense_s8(
+            input_activations,
+            hidden_activations,
+            fc1_weight_data,
+            fc1_bias_data,
+            /* M */ 1, /* K */ INPUT_DIM, /* N */ HIDDEN_DIM,
+            INPUT_STRIDE, HIDDEN_STRIDE, HIDDEN_STRIDE,
+            /* scale */ FC1_WEIGHT_SCALE,
+            /* shift */ FC1_WEIGHT_SHIFT,
+            /* relu */ 1
+        );
+
+        // 5. LAYER 2: Dense (16 -> 8) Linear Logits
+        gemmrv_nn_dense_s8(
+            hidden_activations,
+            output_logits,
+            fc2_weight_data,
+            fc2_bias_data,
+            /* M */ 1, /* K */ HIDDEN_DIM, /* N */ OUTPUT_DIM,
+            HIDDEN_STRIDE, OUTPUT_STRIDE, OUTPUT_STRIDE,
+            /* scale */ FC2_WEIGHT_SCALE,
+            /* shift */ FC2_WEIGHT_SHIFT,
+            /* relu */ 0
+        );
+
+        uint32_t end_cycles = neorv32_cpu_csr_read(CSR_MCYCLE);
+        uint32_t latency = end_cycles - start_cycles;
+
+        // 6. Classification Output Decision via argmax
+        int predicted_class = gemmrv_nn_argmax_s8(output_logits, OUTPUT_DIM);
+
+        neorv32_uart0_printf("Input Feature[0]: %d\n", input_activations[0]);
+        neorv32_uart0_printf("Output Logits:    [");
+        for (int i = 0; i < OUTPUT_DIM; i++) {
+            neorv32_uart0_printf("%d%s", output_logits[i], (i == OUTPUT_DIM - 1) ? "" : ", ");
+        }
+        neorv32_uart0_printf("]\n");
+
+        neorv32_uart0_printf("Predicted Class:  %d\n", predicted_class);
+        neorv32_uart0_printf("Systolic Latency: %u CPU clock cycles\n", latency);
+        neorv32_uart0_printf("STATUS: SUCCESS\n");
+
+        neorv32_gpio_port_set(0xAA);
+        neorv32_aux_delay_ms(clk, 1000);
     }
-
-    neorv32_uart0_printf("[INFERENCE] Running Layer 1 (Dense: 32 -> 16 with ReLU)...\n");
-    uint64_t start_cycles = gemmrv_nn_get_cycles();
-
-    // 4. LAYER 1: Dense (32 -> 16) with Fused ReLU
-    gemmrv_nn_dense_s8(
-        input_activations,
-        hidden_activations,
-        fc1_weight_data,
-        fc1_bias_data,
-        /* M */ 1, /* K */ INPUT_DIM, /* N */ HIDDEN_DIM,
-        INPUT_STRIDE, HIDDEN_STRIDE, HIDDEN_STRIDE,
-        /* scale */ FC1_WEIGHT_SCALE,
-        /* shift */ FC1_WEIGHT_SHIFT,
-        /* relu */ 1
-    );
-
-    neorv32_uart0_printf("[INFERENCE] Running Layer 2 (Dense: 16 -> 8 Linear)...\n");
-
-    // 5. LAYER 2: Dense (16 -> 8) Linear Logits
-    gemmrv_nn_dense_s8(
-        hidden_activations,
-        output_logits,
-        fc2_weight_data,
-        fc2_bias_data,
-        /* M */ 1, /* K */ HIDDEN_DIM, /* N */ OUTPUT_DIM,
-        HIDDEN_STRIDE, OUTPUT_STRIDE, OUTPUT_STRIDE,
-        /* scale */ FC2_WEIGHT_SCALE,
-        /* shift */ FC2_WEIGHT_SHIFT,
-        /* relu */ 0
-    );
-
-    uint64_t end_cycles = gemmrv_nn_get_cycles();
-    uint32_t latency = (uint32_t)(end_cycles - start_cycles);
-
-    // 6. Classification Output Decision
-    int predicted_class = gemmrv_nn_argmax_s8(output_logits, OUTPUT_DIM);
-
-    neorv32_uart0_printf("\n--- Results ---\n");
-    neorv32_uart0_printf("Logits: [");
-    for (int i = 0; i < OUTPUT_DIM; i++) {
-        neorv32_uart0_printf("%d%s", output_logits[i], (i == OUTPUT_DIM - 1) ? "" : ", ");
-    }
-    neorv32_uart0_printf("]\n");
-
-    neorv32_uart0_printf("Predicted Class: %d\n", predicted_class);
-    neorv32_uart0_printf("Inference Latency: %u CPU clock cycles\n", latency);
-    neorv32_uart0_printf("TEST SUCCESSFUL!\n");
 
     return 0;
 }
