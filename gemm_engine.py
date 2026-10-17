@@ -1,9 +1,14 @@
 """
 GEMMrv32 Core Engine & Headless CLI
+The Silis Foundation - Open-Source RISC-V SoC & Systolic GEMM Hardware Accelerator
+
 Provides programmatic & command-line APIs for:
+  - Cross-platform toolchain discovery (Linux/macOS/Windows)
   - Compiling RISC-V projects to NEORV32-compatible raw binaries
-  - Bootloader handshake and firmware flashing
+  - JTAG & SPI Flash FPGA bitstream loading via openFPGALoader
+  - Bootloader handshake and firmware flashing over serial
   - UART terminal I/O & command sending
+  - Memory & BRAM budget calculation
   - Neural network image inference (28x28 digits / 32x32 vehicles)
   - Systolic Array CFS register parsing & telemetry
 """
@@ -16,33 +21,143 @@ import json
 import struct
 import subprocess
 import glob
+import shutil
 import serial
 import serial.tools.list_ports
 import numpy as np
 from PIL import Image
 
-# Global defaults
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_BINS_DIR = os.path.join(REPO_DIR, "example", "bin") if os.path.isdir(os.path.join(REPO_DIR, "example", "bin")) else r"C:\Users\Lenovo\Desktop\bins"
-DEFAULT_SCRIPTS_DIR = os.path.join(REPO_DIR, "example", "src") if os.path.isdir(os.path.join(REPO_DIR, "example", "src")) else r"C:\Users\Lenovo\Desktop\scripts"
-DEFAULT_CAR_IMAGES_DIR = r"C:\Users\Lenovo\Desktop\car_images"
-DEFAULT_DIGIT_IMAGES_DIR = r"C:\Users\Lenovo\Desktop\digit_images"
-DEFAULT_PROJECTS_DIR = os.path.join(REPO_DIR, "example", "src") if os.path.isdir(os.path.join(REPO_DIR, "example", "src")) else r"C:\Users\Lenovo\Desktop\GEMMrv32\GEMMrv32-main\sw\example"
-NEORV32_HOME_DIR = r"C:/Users/Lenovo/Desktop/GEMMrv32"
-DEFAULT_MAKE_PATH = r"D:\vivado\2025.2\Vivado\gnuwin\bin\make.exe"
-DEFAULT_GCC_DIR = r"D:\vivado\2025.2\gnu\riscv\nt\bin"
+DEFAULT_BINS_DIR = os.path.join(REPO_DIR, "example", "bin")
+DEFAULT_PROJECTS_DIR = os.path.join(REPO_DIR, "example", "src")
+DEFAULT_GEMM_LIB_DIR = os.path.join(REPO_DIR, "example", "src", "gemm_lib")
+
 
 class GEMMEngine:
-    def __init__(self, port="COM10", baud=19200):
-        self.port = port
+    def __init__(self, port=None, baud=19200):
+        self.port = port or self.get_default_port()
         self.baud = baud
         self.ser = None
 
     # -------------------------------------------------------------
+    # Cross-Platform Toolchain & Path Discovery
+    # -------------------------------------------------------------
+    @classmethod
+    def find_neorv32_home(cls):
+        """Locates NEORV32 / GEMMrv32 repository root."""
+        env_home = os.environ.get("NEORV32_HOME")
+        if env_home and os.path.isfile(os.path.join(env_home, "sw", "common", "common.mk")):
+            return os.path.abspath(env_home)
+
+        # Common sibling directories
+        candidates = [
+            os.path.join(REPO_DIR, "..", "GEMMrv32"),
+            os.path.join(REPO_DIR, "..", "DOOM-on-GEMMrv32", "neorv32"),
+            os.path.join(REPO_DIR, "..", "neorv32"),
+            "/home/econsystems/random/GEMMrv32",
+        ]
+        for c in candidates:
+            if os.path.isfile(os.path.join(c, "sw", "common", "common.mk")):
+                return os.path.abspath(c)
+        return os.path.abspath(os.path.join(REPO_DIR, "..", "GEMMrv32"))
+
+    @classmethod
+    def find_riscv_prefix(cls):
+        """Auto-detects RISC-V GCC cross-compiler prefix."""
+        env_prefix = os.environ.get("RISCV_PREFIX")
+        if env_prefix:
+            return env_prefix
+
+        prefixes = ["riscv-none-elf-", "riscv64-unknown-elf-", "riscv32-unknown-elf-"]
+        search_dirs = [
+            os.path.join(REPO_DIR, "toolchain", "riscv", "bin"),
+            os.path.join(REPO_DIR, "toolchain", "bin"),
+            os.path.expanduser("~/.local/bin"),
+            "/usr/bin",
+            "/usr/local/bin",
+            "/opt/riscv/bin",
+        ]
+        # Check bundled and explicit search dirs first
+        for sdir in search_dirs:
+            if os.path.isdir(sdir):
+                for p in prefixes:
+                    if os.path.isfile(os.path.join(sdir, f"{p}gcc")):
+                        return p
+
+        # Check PATH
+        for p in prefixes:
+            if shutil.which(f"{p}gcc"):
+                return p
+
+        return "riscv-none-elf-"
+
+    @classmethod
+    def find_make(cls):
+        """Finds GNU make executable."""
+        make_bin = shutil.which("make")
+        if make_bin:
+            return make_bin
+        if sys.platform == "win32":
+            candidates = [
+                r"D:\vivado\2025.2\Vivado\gnuwin\bin\make.exe",
+                r"C:\Program Files\Git\usr\bin\make.exe"
+            ]
+            for c in candidates:
+                if os.path.isfile(c):
+                    return c
+        return "make"
+
+    @classmethod
+    def find_openfpgaloader(cls):
+        """Finds openFPGALoader executable for FPGA JTAG programming."""
+        bin_path = shutil.which("openFPGALoader")
+        if bin_path:
+            return bin_path
+        candidates = [
+            os.path.expanduser("~/.local/bin/openFPGALoader"),
+            "/usr/local/bin/openFPGALoader",
+            "/usr/bin/openFPGALoader"
+        ]
+        for c in candidates:
+            if os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+        return None
+
+    @classmethod
+    def find_default_bitstream(cls):
+        """Finds precompiled FPGA bitstream for Basys 3."""
+        candidates = [
+            os.path.join(REPO_DIR, "..", "DOOM-on-GEMMrv32", "bit", "neorv32_basys3.bit"),
+            os.path.join(REPO_DIR, "..", "GEMMrv32", "sw", "basys", "build", "neorv32_basys3.bit"),
+            os.path.join(REPO_DIR, "bit", "neorv32_basys3.bit"),
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                return os.path.abspath(c)
+        return ""
+
+    @classmethod
+    def get_default_port(cls):
+        """Returns the most appropriate serial port."""
+        ports = cls.list_ports(filter_virtual=True)
+        if not ports:
+            return "/dev/ttyUSB1" if sys.platform.startswith("linux") else "COM10"
+
+        # Check for FTDI UART (/dev/ttyUSB1 or interface 1)
+        for p in ports:
+            dev = p["device"]
+            if "ttyUSB1" in dev or ("0403:6010" in p.get("hwid", "") and "LOCATION=" in p.get("hwid", "") and ".1" in p.get("hwid", "")):
+                return dev
+        for p in ports:
+            if "ttyUSB" in p["device"]:
+                return p["device"]
+        return ports[0]["device"]
+
+    # -------------------------------------------------------------
     # Toolchain: Project Build & Packaging
     # -------------------------------------------------------------
-    @staticmethod
-    def ensure_makefile(proj_dir, target_name):
+    @classmethod
+    def ensure_makefile(cls, proj_dir, target_name):
         c_files = glob.glob(os.path.join(proj_dir, "*.c"))
         c_basenames = [os.path.basename(f) for f in c_files]
         if "main.c" in c_basenames:
@@ -54,15 +169,39 @@ class GEMMEngine:
         else:
             c_sources = " ".join(c_basenames) if c_basenames else "main.c"
 
-        makefile_path = os.path.join(proj_dir, "makefile")
-        gemm_inc_dir = r"C:/Users/Lenovo/Desktop/scripts/gemm_lib"
+        # Check if project uses GEMM hardware library
+        uses_gemm = False
+        for cf in c_files:
+            try:
+                with open(cf, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                    if "gemmrv" in content or "gemm_lib" in content:
+                        uses_gemm = True
+                        break
+            except Exception:
+                pass
 
-        content = f"""# Auto-generated NEORV32 GEMMrv32 makefile
-APP_SRC ?= {c_sources}
-NEORV32_HOME ?= {NEORV32_HOME_DIR}
+        if uses_gemm:
+            rel_gemm = os.path.relpath(DEFAULT_GEMM_LIB_DIR, proj_dir)
+            c_sources += f" {rel_gemm}/gemmrv_hw.c"
+
+        neorv32_home = cls.find_neorv32_home()
+        riscv_prefix = cls.find_riscv_prefix()
+
+        makefile_path = os.path.join(proj_dir, "Makefile")
+        content = f"""# Auto-generated NEORV32 GEMMrv32 Makefile
+MARCH ?= rv32im_zicsr_zifencei
+RISCV_PREFIX ?= {riscv_prefix}
 EFFORT ?= -O2
-USER_FLAGS ?= -I. -I"{gemm_inc_dir}"
 
+APP_SRC ?= {c_sources}
+APP_INC += -I . -I {DEFAULT_GEMM_LIB_DIR}
+
+# Basys 3 BRAM configuration (128 KB ROM, 64 KB RAM)
+USER_FLAGS += -Wl,--defsym,__neorv32_rom_size=128k
+USER_FLAGS += -Wl,--defsym,__neorv32_ram_size=64k
+
+NEORV32_HOME ?= {neorv32_home}
 include $(NEORV32_HOME)/sw/common/common.mk
 """
         with open(makefile_path, "w", encoding="utf-8") as f:
@@ -72,7 +211,7 @@ include $(NEORV32_HOME)/sw/common/common.mk
     @classmethod
     def build_project(cls, proj_dir, opt_level="-O2", out_bin_path=None, log_cb=None):
         """
-        Builds a RISC-V project in proj_dir using Vivado GNU make/gcc.
+        Builds a RISC-V project in proj_dir using detected GNU make & RISC-V GCC.
         Returns (success: bool, info: dict)
         """
         if not os.path.isdir(proj_dir):
@@ -88,25 +227,34 @@ include $(NEORV32_HOME)/sw/common/common.mk
                 log_cb(msg)
 
         # Check makefile
-        makefile_path = os.path.join(proj_dir, "makefile")
+        makefile_path = os.path.join(proj_dir, "Makefile")
         if not os.path.exists(makefile_path):
-            makefile_path = os.path.join(proj_dir, "Makefile")
+            makefile_path = os.path.join(proj_dir, "makefile")
         if not os.path.exists(makefile_path):
-            emit(f"[INFO] Auto-generating makefile for {target_name}...\n")
+            emit(f"[INFO] Auto-generating Makefile for {target_name}...\n")
             cls.ensure_makefile(proj_dir, target_name)
 
+        neorv32_home = cls.find_neorv32_home()
+        riscv_prefix = cls.find_riscv_prefix()
+        make_bin = cls.find_make()
+
         env = os.environ.copy()
-        env["PATH"] = DEFAULT_GCC_DIR + ";" + os.path.dirname(DEFAULT_MAKE_PATH) + ";" + env.get("PATH", "")
+        # Prepend bundled toolchain and local bin to PATH
+        bundled_bin = os.path.join(REPO_DIR, "toolchain", "riscv", "bin")
+        local_bin = os.path.expanduser("~/.local/bin")
+        extra_paths = [p for p in [bundled_bin, local_bin] if os.path.isdir(p)]
+        if extra_paths:
+            env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
 
         cmd = [
-            DEFAULT_MAKE_PATH,
-            f"NEORV32_HOME={NEORV32_HOME_DIR}",
-            "RISCV_PREFIX=riscv64-unknown-elf-",
+            make_bin,
+            f"NEORV32_HOME={neorv32_home}",
+            f"RISCV_PREFIX={riscv_prefix}",
             f"EFFORT={opt_level}",
             "clean_all",
-            "elf"
+            "exe"
         ]
-        emit(f"[BUILD] Running: {' '.join(cmd)}\n")
+        emit(f"[BUILD] Command: {' '.join(cmd)}\n")
 
         proc = subprocess.Popen(cmd, cwd=proj_dir, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -117,63 +265,160 @@ include $(NEORV32_HOME)/sw/common/common.mk
             emit(line)
         proc.wait()
 
-        main_elf = os.path.join(proj_dir, "main.elf")
-        if not os.path.exists(main_elf):
-            main_elf = os.path.join(proj_dir, "build", "main.elf")
-
-        if not os.path.exists(main_elf):
+        if proc.returncode != 0:
             return False, {
-                "error": "Compilation failed; main.elf not generated.",
+                "error": f"Make failed with exit code {proc.returncode}.",
                 "exit_code": proc.returncode,
                 "log": "".join(output_lines)
             }
 
-        # Convert to binary via objcopy
-        elf_bin = os.path.join(proj_dir, "elf.bin")
-        objcopy_exe = os.path.join(DEFAULT_GCC_DIR, "riscv64-unknown-elf-objcopy.exe")
-        obj_cmd = [objcopy_exe, "-I", "elf32-littleriscv", "-O", "binary", main_elf, elf_bin]
-        emit(f"[BUILD] Extracting flat binary with objcopy...\n")
-        subprocess.run(obj_cmd, cwd=proj_dir, env=env, check=True)
+        # Check generated executable binary
+        candidates = [
+            os.path.join(proj_dir, "neorv32_exe.bin"),
+            os.path.join(proj_dir, "build", "neorv32_exe.bin"),
+            os.path.join(proj_dir, f"{target_name}.bin"),
+        ]
+        built_bin = None
+        for c in candidates:
+            if os.path.exists(c):
+                built_bin = c
+                break
 
-        if not os.path.exists(elf_bin):
-            return False, {"error": "objcopy failed to produce elf.bin."}
+        if not built_bin:
+            # Fallback to objcopy if standard image_gen wasn't invoked
+            main_elf = os.path.join(proj_dir, "main.elf")
+            if not os.path.exists(main_elf):
+                main_elf = os.path.join(proj_dir, "build", "main.elf")
+            if not os.path.exists(main_elf):
+                return False, {"error": "Compilation failed: neither neorv32_exe.bin nor main.elf found."}
 
-        # Pack NEORV32 bootloader image (16-byte header: signature, base_addr, size, checksum)
-        with open(elf_bin, "rb") as f:
-            raw_data = f.read()
+            objcopy_bin = f"{riscv_prefix}objcopy"
+            elf_bin = os.path.join(proj_dir, "elf.bin")
+            subprocess.run([objcopy_bin, "-I", "elf32-littleriscv", "-O", "binary", main_elf, elf_bin],
+                           cwd=proj_dir, env=env, check=True)
+            with open(elf_bin, "rb") as f:
+                raw_data = f.read()
+            padded_size = (len(raw_data) + 3) & ~3
+            raw_data = raw_data.ljust(padded_size, b"\x00")
+            checksum = 0
+            for i in range(0, padded_size, 4):
+                val = struct.unpack("<I", raw_data[i:i+4])[0]
+                checksum = (checksum + val) & 0xFFFFFFFF
+            checksum = (~checksum) & 0xFFFFFFFF
+            header = struct.pack("<IIII", 0x214F454E, 0x00000000, padded_size, checksum)
+            with open(out_bin_path, "wb") as f:
+                f.write(header + raw_data)
+        else:
+            shutil.copy2(built_bin, out_bin_path)
 
-        # Word-align / pad binary
-        padded_size = (len(raw_data) + 3) & ~3
-        raw_data = raw_data.ljust(padded_size, b"\x00")
+        file_size = os.path.getsize(out_bin_path)
+        emit(f"[BUILD SUCCESS] Target ready: {out_bin_path} ({file_size} bytes)\n")
 
-        # Sum 32-bit words
-        checksum = 0
-        for i in range(0, padded_size, 4):
-            val = struct.unpack("<I", raw_data[i:i+4])[0]
-            checksum = (checksum + val) & 0xFFFFFFFF
-        checksum = (~checksum) & 0xFFFFFFFF
-
-        base_addr = 0x00000000  # Default IMEM base address
-        header = struct.pack("<IIII", 0x214F454E, base_addr, padded_size, checksum)
-        with open(out_bin_path, "wb") as f:
-            f.write(header + raw_data)
-
-        total_size = len(header) + len(raw_data)
-        emit(f"[BUILD SUCCESS] Generated {out_bin_path} ({total_size} bytes, raw={padded_size})\n")
+        # Parse memory utilization from ELF if available
+        mem_info = cls.parse_elf_memory(proj_dir, riscv_prefix, env)
         return True, {
             "bin_path": out_bin_path,
-            "raw_size": padded_size,
-            "total_size": total_size,
-            "checksum": f"0x{checksum:08X}"
+            "total_size": file_size,
+            "memory": mem_info
         }
+
+    @classmethod
+    def parse_elf_memory(cls, proj_dir, riscv_prefix, env=None):
+        """Extracts text, data, bss sizes using riscv-size."""
+        main_elf = os.path.join(proj_dir, "main.elf")
+        if not os.path.exists(main_elf):
+            main_elf = os.path.join(proj_dir, "build", "main.elf")
+        if not os.path.exists(main_elf):
+            return {}
+
+        size_bin = f"{riscv_prefix}size"
+        try:
+            res = subprocess.run([size_bin, main_elf], stdout=subprocess.PIPE, text=True, check=True, env=env)
+            lines = res.stdout.strip().split("\n")
+            if len(lines) >= 2:
+                parts = lines[1].split()
+                text = int(parts[0])
+                data = int(parts[1])
+                bss = int(parts[2])
+                imem_used = text + data
+                dmem_used = data + bss
+                return {
+                    "text": text,
+                    "data": data,
+                    "bss": bss,
+                    "imem_used": imem_used,
+                    "dmem_used": dmem_used,
+                    "rom_limit": 128 * 1024,
+                    "ram_limit": 64 * 1024,
+                    "bram_total_budget": 225 * 1024
+                }
+        except Exception:
+            pass
+        return {}
+
+    # -------------------------------------------------------------
+    # FPGA Bitstream Flasher (openFPGALoader)
+    # -------------------------------------------------------------
+    @classmethod
+    def flash_bitstream(cls, bit_path, board="basys3", spi_flash=False, log_cb=None):
+        """
+        Flashes FPGA bitstream to Basys 3 via openFPGALoader.
+        If spi_flash is True, writes persistently to SPI flash (-f).
+        Otherwise loads directly into SRAM over JTAG.
+        """
+        def emit(msg):
+            if log_cb:
+                log_cb(msg)
+
+        if not bit_path or not os.path.isfile(bit_path):
+            return False, {"error": f"Bitstream file not found: {bit_path}"}
+
+        loader = cls.find_openfpgaloader()
+        if not loader:
+            return False, {"error": "openFPGALoader not found. Please install it or check ~/.local/bin."}
+
+        target_mode = "SPI Flash (persistent)" if spi_flash else "SRAM (instant JTAG)"
+        emit(f"[FPGA] Programming Basys 3 [{target_mode}] with {os.path.basename(bit_path)}...\n")
+
+        cmd = [loader, f"--board={board}"]
+        if spi_flash:
+            cmd.append("-f")
+        cmd.append(bit_path)
+
+        emit(f"[FPGA] Executing: {' '.join(cmd)}\n")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        output_lines = []
+        for line in proc.stdout:
+            output_lines.append(line)
+            emit(line)
+        proc.wait()
+
+        if proc.returncode == 0:
+            emit(f"[FPGA SUCCESS] FPGA successfully programmed!\n")
+            return True, {"exit_code": 0, "log": "".join(output_lines)}
+        else:
+            emit(f"[FPGA ERROR] Programming failed with code {proc.returncode}.\n")
+            return False, {"error": f"openFPGALoader exited with code {proc.returncode}.", "log": "".join(output_lines)}
 
     # -------------------------------------------------------------
     # Serial Port Management
     # -------------------------------------------------------------
     @staticmethod
-    def list_ports():
+    def list_ports(filter_virtual=True):
         ports = serial.tools.list_ports.comports()
-        return [{"device": p.device, "description": p.description, "hwid": p.hwid} for p in ports]
+        results = []
+        for p in ports:
+            dev = p.device
+            # Filter out virtual Linux /dev/ttyS* ports
+            if filter_virtual and sys.platform.startswith("linux"):
+                if dev.startswith("/dev/ttyS") and not dev.startswith("/dev/ttyUSB") and not dev.startswith("/dev/ttyACM"):
+                    continue
+            results.append({
+                "device": dev,
+                "description": p.description,
+                "hwid": p.hwid or ""
+            })
+        return results
 
     def open_serial(self):
         self.close_serial()
@@ -202,12 +447,12 @@ include $(NEORV32_HOME)/sw/common/common.mk
             if log_cb:
                 log_cb(msg)
 
-        emit(f"[FLASHER] Connecting to {self.port} @ {self.baud}...\n")
+        emit(f"[FLASHER] Connecting to {self.port} @ {self.baud} baud...\n")
         self.close_serial()
         time.sleep(0.3)
 
         flash_ser = None
-        for _ in range(4):
+        for _ in range(5):
             try:
                 flash_ser = serial.Serial(self.port, self.baud, timeout=0.2)
                 break
@@ -215,27 +460,36 @@ include $(NEORV32_HOME)/sw/common/common.mk
                 time.sleep(0.3)
 
         if not flash_ser or not flash_ser.is_open:
-            return False, {"error": f"Could not open {self.port}."}
+            return False, {"error": f"Could not open serial port {self.port}."}
 
         bootloader_ready = False
         emit("[FLASHER] Probing NEORV32 bootloader prompt...\n")
-        for _ in range(5):
-            flash_ser.write(b"\r\n")
+        # Send space and newlines (aborts auto-boot countdown)
+        for _ in range(3):
+            flash_ser.write(b" \r\n")
             flash_ser.flush()
-            time.sleep(0.1)
+            time.sleep(0.15)
             resp = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
-            if "CMD:>" in resp or "bootloader" in resp.lower():
+            if "CMD:>" in resp or "bootloader" in resp.lower() or "Available CMDs" in resp:
                 bootloader_ready = True
                 break
 
         if not bootloader_ready:
-            emit("[FLASHER] Waiting for user / FPGA reset (press PROG/RESET on board)...\n")
+            flash_ser.write(b"h\r\n")
+            flash_ser.flush()
+            time.sleep(0.2)
+            resp = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
+            if "CMD:>" in resp or "Available CMDs" in resp:
+                bootloader_ready = True
+
+        if not bootloader_ready:
+            emit("[FLASHER] Waiting for bootloader prompt / FPGA reset...\n")
             t_end = time.time() + timeout_sec
             while time.time() < t_end:
-                flash_ser.write(b"\r\n")
+                flash_ser.write(b" \r\n")
                 time.sleep(0.2)
                 resp = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
-                if "CMD:>" in resp:
+                if "CMD:>" in resp or "Available CMDs" in resp:
                     bootloader_ready = True
                     break
 
@@ -256,16 +510,17 @@ include $(NEORV32_HOME)/sw/common/common.mk
             checksum_calc = (checksum_calc + struct.unpack("<I", chunk)[0]) & 0xFFFFFFFF
 
         flash_ser.reset_input_buffer()
-        flash_ser.write(b"u") # upload command
+        flash_ser.write(b"u")  # upload command
         time.sleep(0.3)
         flash_ser.read(flash_ser.in_waiting)
 
-        chunk_size = 256
+        # High-throughput streaming
+        chunk_size = 1024
         for offset in range(0, file_size, chunk_size):
             chunk = data[offset:offset+chunk_size]
             flash_ser.write(chunk)
             flash_ser.flush()
-            time.sleep(0.015)
+            time.sleep(0.005)
 
         time.sleep(0.6)
         boot_resp = flash_ser.read(flash_ser.in_waiting).decode('latin-1', errors='ignore')
@@ -360,12 +615,10 @@ include $(NEORV32_HOME)/sw/common/common.mk
         reg6 = fields.get("CMD", fields.get("REG6", 0))
         reg7 = fields.get("DIM", fields.get("REG7", 0))
 
-        # Decode REG6 bitfields
         start = bool(reg6 & 1)
         clear = bool(reg6 & 2)
         done = bool(reg6 & 4)
 
-        # Decode REG7 tile dims (M, K, N)
         tile_m = (reg7 >> 16) & 0xFF
         tile_k = (reg7 >> 8) & 0xFF
         tile_n = reg7 & 0xFF
@@ -407,10 +660,17 @@ def main():
     p_build.add_argument("--output", "-o", default=None, help="Output .bin file path")
     p_build.add_argument("--json", action="store_true", help="Output results in JSON format")
 
+    # Subcommand: flash-bitstream
+    p_fbit = subparsers.add_parser("flash-bitstream", help="Program Basys 3 FPGA bitstream via openFPGALoader")
+    p_fbit.add_argument("--bit", "-b", default=None, help="Path to .bit bitstream file")
+    p_fbit.add_argument("--board", default="basys3", help="Target FPGA board (default: basys3)")
+    p_fbit.add_argument("--spi-flash", action="store_true", help="Write to SPI flash (persistent)")
+    p_fbit.add_argument("--json", action="store_true", help="Output results in JSON format")
+
     # Subcommand: flash
     p_flash = subparsers.add_parser("flash", help="Flash binary firmware onto NEORV32 board")
     p_flash.add_argument("--bin", "-b", required=True, help="Path to .bin file")
-    p_flash.add_argument("--port", default="COM10", help="Serial port (e.g., COM10)")
+    p_flash.add_argument("--port", default=None, help="Serial port (e.g., /dev/ttyUSB1)")
     p_flash.add_argument("--baud", type=int, default=19200, help="Baud rate (default 19200)")
     p_flash.add_argument("--json", action="store_true", help="Output results in JSON format")
 
@@ -418,22 +678,45 @@ def main():
     p_infer = subparsers.add_parser("infer", help="Send test image to FPGA for neural network inference")
     p_infer.add_argument("--image", "-i", required=True, help="Path to image file (.png/.jpg)")
     p_infer.add_argument("--dataset", "-d", default="digits", choices=["digits", "vehicles"], help="Dataset type")
-    p_infer.add_argument("--port", default="COM10", help="Serial port")
+    p_infer.add_argument("--port", default=None, help="Serial port")
     p_infer.add_argument("--baud", type=int, default=19200, help="Baud rate")
     p_infer.add_argument("--timeout", type=float, default=3.0, help="Wait timeout for prediction response")
     p_infer.add_argument("--json", action="store_true", help="Output results in JSON format")
 
+    # Subcommand: console / monitor
+    p_console = subparsers.add_parser("console", aliases=["monitor"], help="Launch interactive full-screen TUI hardware console")
+    p_console.add_argument("--port", "-p", default=None, help="Serial port (e.g., /dev/ttyUSB1)")
+    p_console.add_argument("--baud", "-b", "--baude", type=int, default=19200, help="Baud rate (default 19200)")
+
     args = parser.parse_args()
 
-    if args.subcommand == "list-ports":
+    if args.subcommand in ("console", "monitor"):
+        from gemm_tui import launch_console
+        launch_console(port=args.port, baud=args.baud)
+        sys.exit(0)
+
+    elif args.subcommand == "list-ports":
         ports = GEMMEngine.list_ports()
         print(json.dumps(ports, indent=2))
         sys.exit(0)
 
+    elif args.subcommand == "flash-bitstream":
+        bit_path = args.bit or GEMMEngine.find_default_bitstream()
+        def log_handler(msg):
+            if not args.json:
+                sys.stdout.write(msg)
+                sys.stdout.flush()
+
+        success, res = GEMMEngine.flash_bitstream(bit_path, board=args.board, spi_flash=args.spi_flash, log_cb=log_handler)
+        if args.json:
+            res["success"] = success
+            print(json.dumps(res, indent=2))
+        sys.exit(0 if success else 1)
+
     elif args.subcommand == "build":
         proj_dir = args.project
         if not os.path.isabs(proj_dir):
-            candidate = os.path.join(DEFAULT_SCRIPTS_DIR, proj_dir)
+            candidate = os.path.join(DEFAULT_PROJECTS_DIR, proj_dir)
             if os.path.isdir(candidate):
                 proj_dir = candidate
 
@@ -470,7 +753,6 @@ def main():
 
         success, res = engine.send_image(args.image, dataset_type=args.dataset, log_cb=log_handler)
         if success and engine.ser:
-            # Read response up to timeout
             t_end = time.time() + args.timeout
             lines = []
             while time.time() < t_end:
@@ -491,6 +773,7 @@ def main():
 
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()
