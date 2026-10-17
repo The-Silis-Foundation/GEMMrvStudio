@@ -22,8 +22,10 @@ GEMMrvStudio/
 │   │   ├── demo_lenet/
 │   │   ├── demo_micro_transformer/
 │   │   ├── demo_predictive_lm/
-│   │   ├── demo_vga_doom/   # Standalone VGA framebuffer & graphics test
-│   │   ├── gemm_lib/        # Official GEMMrv32 hardware driver library (gemmrv_hw.c/h)
+│   │   ├── demo_vga_doom.bin
+│   │   ├── gemm_lib/        # Official GEMMrv32 hardware driver library
+│   │   │   ├── gemmrv_hw.h/c # Low-level CFS 8x8 systolic array driver
+│   │   │   └── gemmrv_nn.h/c # Standard CMSIS-NN/TFLite-style neural layer API
 │   │   ├── hello_c/
 │   │   ├── hello_cpp/
 │   │   └── hello_world/
@@ -33,6 +35,7 @@ GEMMrvStudio/
 │       ├── demo_gemm.bin
 │       ├── demo_vga_doom.bin
 │       └── ...
+├── gemm_quantizer.py        # Autonomous int8 tensor quantizer & TFLite model inspector
 └── README.md
 ```
 
@@ -45,15 +48,19 @@ GEMMrvStudio/
 - **Dual Themes**:
   - **Industrial Light** (default): Crisp, high-contrast engineering light mode.
   - **Industrial Dark**: Arduino Dark (`#1e1e1e` / `#252526` with `#00979c` teal accents).
-- **QScintilla Code Editor**: Industrial-grade editing engine with synchronized line numbering, bracket matching, auto-indentation, and C/C++ syntax highlighting tailored for RISC-V and GEMMrv32 primitives (`gemmrv_mat`, `gemmrv_mat_out`, `gemmrv_mult`).
+- **QScintilla Code Editor**: Industrial-grade editing engine with synchronized line numbering, bracket matching, auto-indentation, and C/C++ syntax highlighting tailored for RISC-V and GEMMrv32 primitives (`gemmrv_mat`, `gemmrv_mat_out`, `gemmrv_mult`, `gemmrv_nn_*`).
 
-### 2. Automatic Makefile & Dependency Management
-- **Zero-Config Makefiles**: When opening any C/C++ folder, GEMMrvStudio automatically detects all source files, checks for `#include "gemmrv_hw.h"`, links the bundled `gemm_lib` driver, configures GEMMrv32 on-chip RAM/ROM bounds, and connects to the Board Support Package without requiring manual configuration.
-- **1-Click Verify (`✓`)**: Builds the firmware using `make exe` via the bundled cross-compiler.
-- **1-Click Upload (`➜`)**: Compiles, uploads via paced binary streaming to the bootloader, verifies checksums, boots the application (`e`), and opens the serial monitor.
+### 2. Standardized Neural Network Library (`gemmrv_nn.h`)
+- **CMSIS-NN & TFLite Micro Compatible**: Developers write clean, readable neural inference pipelines with standard layer calls:
+  - `gemmrv_nn_dense_s8()`: Fully-connected layers tiled and accelerated on the $8 \times 8$ systolic array.
+  - `gemmrv_nn_conv2d_s8()`: Memory-efficient sliding 2D convolution via im2col + systolic GEMM.
+  - `gemmrv_nn_attention_s8()`: Multi-head / self-attention for micro-transformers ($Q \times K^T \to \text{Softmax} \to S \times V$).
+  - Fast vector activations & pooling: `gemmrv_nn_relu_s8`, `gemmrv_nn_maxpool2d_s8`, `gemmrv_nn_argmax_s8`, `gemmrv_nn_softmax_s8`.
 
-### 3. Practical GEMM Coprocessor Workbench
-- **Memory Stride & Zero-Padding Scaffolder**: Calculates the hardware-required 8-byte stride alignment and 4-byte pointer alignment for arbitrary matrix dimensions ($M \times K \times N$) and generates drop-in C initialization arrays and structs.
+### 3. Practical GEMM Coprocessor Workbench (Sidebar)
+- **Quantization & Weight Exporter**: Converts PyTorch/NumPy tensors (`.npy`, `.npz`) and TFLite models to signed 8-bit integers, calculates fixed-point scale/shift constants, and zero-pads to 8-stride hardware boundaries into a ready-to-compile `weights.h`.
+- **Layer Codegen Scaffolder**: Generates copy-paste C inference templates for Dense, Conv2D, and Transformer Attention layers.
+- **Memory Stride & Zero-Padding Scaffolder**: Calculates hardware 8-stride alignment and emits drop-in C structs.
 - **SRAM Tiling & Budget Planner**: Decomposes large matrices into $8 \times 8 \times 8$ systolic tiles and checks memory footprint against the **64 KB on-chip DMEM limit** of the GEMMrv32 processor.
 
 ### 4. Full-Screen TUI Serial Console

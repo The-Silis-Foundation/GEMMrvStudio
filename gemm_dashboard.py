@@ -26,6 +26,7 @@ from gemm_engine import (
     DEFAULT_GEMM_LIB_DIR,
     REPO_DIR
 )
+from gemm_quantizer import GEMMQuantizer, TFLiteDecomposer
 
 # ---------------------------------------------------------------------------
 # Industrial Color Palettes (Arduino 2.x Inspired: Dark & Light)
@@ -215,13 +216,265 @@ class GEMMDevWorkbench(QtWidgets.QWidget):
         self.tabs = QtWidgets.QTabWidget()
         self.tab_pad = QtWidgets.QWidget()
         self.tab_tiling = QtWidgets.QWidget()
+        self.tab_quant = QtWidgets.QWidget()
+        self.tab_nn = QtWidgets.QWidget()
 
-        self.tabs.addTab(self.tab_pad, "Stride Padding & Arrays")
-        self.tabs.addTab(self.tab_tiling, "Tiling & SRAM Planner")
+        self.tabs.addTab(self.tab_pad, "Stride & Array")
+        self.tabs.addTab(self.tab_tiling, "SRAM Planner")
+        self.tabs.addTab(self.tab_quant, "Quantizer & Weights")
+        self.tabs.addTab(self.tab_nn, "Layer Codegen")
         layout.addWidget(self.tabs)
 
         self.setup_pad_tab()
         self.setup_tiling_tab()
+        self.setup_quant_tab()
+        self.setup_nn_tab()
+
+    def setup_quant_tab(self):
+        layout = QtWidgets.QVBoxLayout(self.tab_quant)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        desc = QtWidgets.QLabel(
+            "Converts PyTorch/NumPy (.npy, .npz) or TFLite weights to int8.\n"
+            "Calculates scale/shift and zero-pads to 8-stride hardware boundaries."
+        )
+        desc.setStyleSheet("font-size: 10px; color: #888888;")
+        layout.addWidget(desc)
+
+        file_box = QtWidgets.QHBoxLayout()
+        self.txt_weight_path = QtWidgets.QLineEdit()
+        self.txt_weight_path.setPlaceholderText("Select .npy, .npz, or .tflite model...")
+        file_box.addWidget(self.txt_weight_path)
+
+        btn_browse = QtWidgets.QPushButton("Browse...")
+        btn_browse.clicked.connect(self.browse_weight_file)
+        file_box.addWidget(btn_browse)
+        layout.addLayout(file_box)
+
+        grid = QtWidgets.QGridLayout()
+        grid.addWidget(QtWidgets.QLabel("Target Bit-Width:"), 0, 0)
+        self.cmb_q_bits = QtWidgets.QComboBox()
+        self.cmb_q_bits.addItems(["8-bit Signed (Native Systolic)", "16-bit Signed"])
+        grid.addWidget(self.cmb_q_bits, 0, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Header Guard Name:"), 1, 0)
+        self.txt_model_name = QtWidgets.QLineEdit("MODEL_WEIGHTS")
+        grid.addWidget(self.txt_model_name, 1, 1)
+        layout.addLayout(grid)
+
+        btn_quantize = QtWidgets.QPushButton("Quantize & Export weights.h")
+        btn_quantize.setStyleSheet(
+            "background-color: #00979c; color: #ffffff; font-weight: bold; padding: 6px; border-radius: 3px;"
+        )
+        btn_quantize.clicked.connect(self.run_quantize_and_export)
+        layout.addWidget(btn_quantize)
+
+        self.txt_quant_preview = QtWidgets.QPlainTextEdit()
+        self.txt_quant_preview.setReadOnly(True)
+        self.txt_quant_preview.setFont(QtGui.QFont("Monospace", 9))
+        self.txt_quant_preview.setPlaceholderText("C header preview will appear here...")
+        layout.addWidget(self.txt_quant_preview)
+
+    def browse_weight_file(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select Tensor or Model File", "", "Tensors & Models (*.npy *.npz *.tflite *.bin);;All Files (*)"
+        )
+        if file_path:
+            self.txt_weight_path.setText(file_path)
+
+    def run_quantize_and_export(self):
+        fpath = self.txt_weight_path.text().strip()
+        if not fpath:
+            # Generate demonstration quantized layer
+            import numpy as np
+            mock_tensor = np.random.randn(32, 64).astype(np.float32) * 0.5
+            q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(mock_tensor)
+            padded, orig_shape, stride = GEMMQuantizer.pad_to_systolic_stride(q_arr)
+            tensors = {
+                "demo_dense_weight": {
+                    "data": padded,
+                    "original_shape": orig_shape,
+                    "stride": stride,
+                    "quant_mult": mult,
+                    "quant_shift": shift
+                }
+            }
+            hdr = GEMMQuantizer.export_c_header(tensors, None, self.txt_model_name.text().strip() or "MODEL")
+            self.txt_quant_preview.setPlainText(
+                "// [NOTE] No file selected: Displaying synthetic 32x64 quantized layer preview.\n\n" + hdr
+            )
+            return
+
+        if not os.path.isfile(fpath):
+            self.txt_quant_preview.setPlainText(f"Error: File does not exist:\n{fpath}")
+            return
+
+        try:
+            import numpy as np
+            tensors = {}
+            name_base = os.path.splitext(os.path.basename(fpath))[0]
+
+            if fpath.endswith(".npy"):
+                arr = np.load(fpath)
+                if arr.ndim == 1:
+                    arr = arr.reshape(1, -1)
+                q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(arr)
+                padded, orig_shape, stride = GEMMQuantizer.pad_to_systolic_stride(q_arr)
+                tensors[name_base] = {
+                    "data": padded,
+                    "original_shape": orig_shape,
+                    "stride": stride,
+                    "quant_mult": mult,
+                    "quant_shift": shift
+                }
+            elif fpath.endswith(".npz"):
+                archive = np.load(fpath)
+                for k in archive.files:
+                    arr = archive[k]
+                    if arr.ndim == 1:
+                        arr = arr.reshape(1, -1)
+                    q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(arr)
+                    padded, orig_shape, stride = GEMMQuantizer.pad_to_systolic_stride(q_arr)
+                    tensors[f"{name_base}_{k}"] = {
+                        "data": padded,
+                        "original_shape": orig_shape,
+                        "stride": stride,
+                        "quant_mult": mult,
+                        "quant_shift": shift
+                    }
+            elif fpath.endswith(".tflite"):
+                info = TFLiteDecomposer.inspect_tflite(fpath)
+                self.txt_quant_preview.setPlainText(
+                    f"// TFLite FlatBuffer Model: {os.path.basename(fpath)}\n"
+                    f"// Autonomous graph inspect: {json.dumps(info, indent=2)}\n"
+                )
+                return
+
+            hdr = GEMMQuantizer.export_c_header(tensors, None, self.txt_model_name.text().strip() or "MODEL")
+            self.txt_quant_preview.setPlainText(hdr)
+        except Exception as e:
+            self.txt_quant_preview.setPlainText(f"Quantization Error: {e}")
+
+    def setup_nn_tab(self):
+        layout = QtWidgets.QVBoxLayout(self.tab_nn)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        desc = QtWidgets.QLabel(
+            "CMSIS-NN / TFLite Micro compatible layer generator.\n"
+            "Emits calls mapped directly to gemmrv_nn.h systolic acceleration."
+        )
+        desc.setStyleSheet("font-size: 10px; color: #888888;")
+        layout.addWidget(desc)
+
+        grid = QtWidgets.QGridLayout()
+        grid.addWidget(QtWidgets.QLabel("Layer Type:"), 0, 0)
+        self.cmb_nn_layer = QtWidgets.QComboBox()
+        self.cmb_nn_layer.addItems([
+            "Dense / Fully-Connected (gemmrv_nn_dense_s8)",
+            "Conv2D im2col + GEMM (gemmrv_nn_conv2d_s8)",
+            "Micro-Transformer Attention (gemmrv_nn_attention_s8)"
+        ])
+        self.cmb_nn_layer.currentIndexChanged.connect(self.update_nn_codegen)
+        grid.addWidget(self.cmb_nn_layer, 0, 1)
+
+        layout.addLayout(grid)
+
+        btn_copy = QtWidgets.QPushButton("Regenerate Layer Template")
+        btn_copy.setStyleSheet(
+            "background-color: #00979c; color: #ffffff; font-weight: bold; padding: 6px; border-radius: 3px;"
+        )
+        btn_copy.clicked.connect(self.update_nn_codegen)
+        layout.addWidget(btn_copy)
+
+        self.txt_nn_code = QtWidgets.QPlainTextEdit()
+        self.txt_nn_code.setFont(QtGui.QFont("Monospace", 9))
+        layout.addWidget(self.txt_nn_code)
+
+        self.update_nn_codegen()
+
+    def update_nn_codegen(self):
+        idx = self.cmb_nn_layer.currentIndex()
+        if idx == 0:
+            code = """// -------------------------------------------------------------
+// GEMMrv32 Hardware-Accelerated Dense / FC Layer
+// Requires: #include "gemmrv_nn.h" and aligned(4) memory buffers
+// -------------------------------------------------------------
+#define IN_FEATURES   64
+#define OUT_FEATURES  10
+#define IN_STRIDE     64   // Multiple of 8
+#define WEIGHT_STRIDE 16   // Padded to multiple of 8 ((10 + 7) & ~7)
+#define OUT_STRIDE    16
+
+// Tensor Buffers in DMEM SRAM
+static int8_t  dense_in[IN_STRIDE] __attribute__((aligned(4)));
+static int8_t  dense_out[OUT_STRIDE] __attribute__((aligned(4)));
+
+// Invoke Systolic Array Dense Engine
+gemmrv_nn_dense_s8(
+    dense_in,              // Input activation vector
+    dense_out,             // Output activation vector
+    dense1_weight_data,    // Quantized int8 weight matrix
+    dense1_bias_data,      // Quantized int32 bias vector (or NULL)
+    /* M */ 1,             /* K */ IN_FEATURES, /* N */ OUT_FEATURES,
+    IN_STRIDE, WEIGHT_STRIDE, OUT_STRIDE,
+    /* quant_scale */ DENSE1_SCALE,
+    /* quant_shift */ DENSE1_SHIFT,
+    /* act_relu */ 1       // 1 = Fuse ReLU activation, 0 = Linear
+);
+
+int top_class = gemmrv_nn_argmax_s8(dense_out, OUT_FEATURES);
+"""
+        elif idx == 1:
+            code = """// -------------------------------------------------------------
+// GEMMrv32 Hardware-Accelerated 2D Convolution (im2col + Systolic)
+// Requires: #include "gemmrv_nn.h" and aligned(4) memory buffers
+// -------------------------------------------------------------
+#define IN_H       28
+#define IN_W       28
+#define IN_C       1
+#define OUT_C      8
+#define KERNEL_DIM 3
+
+static int8_t image_in[IN_H * IN_W * IN_C] __attribute__((aligned(4)));
+static int8_t conv_out[26 * 26 * OUT_C] __attribute__((aligned(4)));
+
+gemmrv_nn_conv2d_s8(
+    image_in,
+    conv_out,
+    conv1_weight_data,
+    conv1_bias_data,
+    /* in_dim */  IN_H, IN_W, IN_C,
+    /* out_c */   OUT_C,
+    /* kernel */  KERNEL_DIM, KERNEL_DIM,
+    /* stride */  1, 1,
+    /* pad */     0, 0,
+    /* quant */   CONV1_SCALE, CONV1_SHIFT,
+    /* relu */    1
+);
+"""
+        else:
+            code = """// -------------------------------------------------------------
+// GEMMrv32 Micro-Transformer Self-Attention Layer (int8)
+// Accelerated: Q * K^T and Score * V execute on 8x8 Systolic Array
+// -------------------------------------------------------------
+#define SEQ_LEN 16
+#define D_K     32
+#define D_V     32
+
+static int8_t Q[SEQ_LEN * D_K] __attribute__((aligned(4)));
+static int8_t K[SEQ_LEN * D_K] __attribute__((aligned(4)));
+static int8_t V[SEQ_LEN * D_V] __attribute__((aligned(4)));
+static int8_t attention_out[SEQ_LEN * D_V] __attribute__((aligned(4)));
+
+gemmrv_nn_attention_s8(
+    Q, K, V, attention_out,
+    SEQ_LEN, D_K, D_V,
+    /* qk_scale */ 1, /* qk_shift */ 4
+);
+"""
+        self.txt_nn_code.setPlainText(code)
 
     def setup_pad_tab(self):
         layout = QtWidgets.QVBoxLayout(self.tab_pad)
@@ -569,8 +822,8 @@ class ArduinoGEMMStudio(QtWidgets.QMainWindow):
 
         # Left Sidebar Stack
         self.sidebar_stack = QtWidgets.QStackedWidget()
-        self.sidebar_stack.setMinimumWidth(240)
-        self.sidebar_stack.setMaximumWidth(400)
+        self.sidebar_stack.setMinimumWidth(260)
+        self.sidebar_stack.setMaximumWidth(550)
 
         # Page 0: File Explorer
         self.page_explorer = QtWidgets.QWidget()
