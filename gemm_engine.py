@@ -27,9 +27,26 @@ import numpy as np
 from PIL import Image
 
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_BINS_DIR = os.path.join(REPO_DIR, "example", "bin")
-DEFAULT_PROJECTS_DIR = os.path.join(REPO_DIR, "example", "src")
-DEFAULT_GEMM_LIB_DIR = os.path.join(REPO_DIR, "example", "src", "gemm_lib")
+
+# If running inside a PyInstaller frozen bundle or AppImage mount (/tmp/.mount_*),
+# copy bundled examples and bins to a persistent, writable user workspace (~/.gemmrvstudio).
+if getattr(sys, "frozen", False):
+    USER_WORKSPACE = os.path.expanduser("~/.gemmrvstudio")
+    DEFAULT_BINS_DIR = os.path.join(USER_WORKSPACE, "example", "bin")
+    DEFAULT_PROJECTS_DIR = os.path.join(USER_WORKSPACE, "example", "src")
+    DEFAULT_GEMM_LIB_DIR = os.path.join(USER_WORKSPACE, "example", "src", "gemm_lib")
+
+    # Seed workspace if not already present or out of date
+    if not os.path.isdir(DEFAULT_PROJECTS_DIR):
+        os.makedirs(DEFAULT_BINS_DIR, exist_ok=True)
+        os.makedirs(DEFAULT_PROJECTS_DIR, exist_ok=True)
+        bundled_example = os.path.join(REPO_DIR, "example")
+        if os.path.isdir(bundled_example):
+            shutil.copytree(bundled_example, os.path.join(USER_WORKSPACE, "example"), dirs_exist_ok=True)
+else:
+    DEFAULT_BINS_DIR = os.path.join(REPO_DIR, "example", "bin")
+    DEFAULT_PROJECTS_DIR = os.path.join(REPO_DIR, "example", "src")
+    DEFAULT_GEMM_LIB_DIR = os.path.join(REPO_DIR, "example", "src", "gemm_lib")
 
 
 class GEMMEngine:

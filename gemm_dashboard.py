@@ -1153,9 +1153,12 @@ class ArduinoGEMMStudio(QtWidgets.QMainWindow):
             return
         sci = self.editor_tabs.widget(idx)
         if hasattr(sci, "file_path") and sci.file_path:
-            with open(sci.file_path, "w", encoding="utf-8") as f:
-                f.write(sci.text())
-            self.lbl_status.setText(f"Saved: {os.path.basename(sci.file_path)}")
+            try:
+                with open(sci.file_path, "w", encoding="utf-8") as f:
+                    f.write(sci.text())
+                self.lbl_status.setText(f"Saved: {os.path.basename(sci.file_path)}")
+            except OSError as e:
+                self.lbl_status.setText(f"Read-only file: {os.path.basename(sci.file_path)} (changes in memory)")
 
     # -------------------------------------------------------------
     # Navigation & Drawers
