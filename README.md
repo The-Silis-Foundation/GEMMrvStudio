@@ -48,13 +48,13 @@ GEMMrvStudio/
 - **QScintilla Code Editor**: Industrial-grade editing engine with synchronized line numbering, bracket matching, auto-indentation, and C/C++ syntax highlighting tailored for RISC-V and GEMMrv32 primitives (`gemmrv_mat`, `gemmrv_mat_out`, `gemmrv_mult`).
 
 ### 2. Automatic Makefile & Dependency Management
-- **Zero-Config Makefiles**: When opening any C/C++ folder, GEMMrvStudio automatically detects all source files, checks for `#include "gemmrv_hw.h"`, links the bundled `gemm_lib` driver, configures Basys 3 RAM/ROM bounds, and connects to the NEORV32 Board Support Package without requiring manual configuration.
+- **Zero-Config Makefiles**: When opening any C/C++ folder, GEMMrvStudio automatically detects all source files, checks for `#include "gemmrv_hw.h"`, links the bundled `gemm_lib` driver, configures GEMMrv32 on-chip RAM/ROM bounds, and connects to the Board Support Package without requiring manual configuration.
 - **1-Click Verify (`✓`)**: Builds the firmware using `make exe` via the bundled cross-compiler.
 - **1-Click Upload (`➜`)**: Compiles, uploads via paced binary streaming to the bootloader, verifies checksums, boots the application (`e`), and opens the serial monitor.
 
 ### 3. Practical GEMM Coprocessor Workbench
 - **Memory Stride & Zero-Padding Scaffolder**: Calculates the hardware-required 8-byte stride alignment and 4-byte pointer alignment for arbitrary matrix dimensions ($M \times K \times N$) and generates drop-in C initialization arrays and structs.
-- **SRAM Tiling & Budget Planner**: Decomposes large matrices into $8 \times 8 \times 8$ systolic tiles and checks memory footprint against the **64 KB DMEM limit** of the Basys 3 FPGA.
+- **SRAM Tiling & Budget Planner**: Decomposes large matrices into $8 \times 8 \times 8$ systolic tiles and checks memory footprint against the **64 KB on-chip DMEM limit** of the GEMMrv32 processor.
 
 ### 4. Full-Screen TUI Serial Console
 - Dedicated curses terminal with live streaming serial I/O.
@@ -84,7 +84,7 @@ sudo apt install -y python3-pyqt5 python3-pyqt5.qsci python3-pyqt5.qtsvg python3
 python3 gemm_dashboard.py
 ```
 * **Verify (`✓`)**: Compiles current sketch.
-* **Upload (`➜`)**: Compiles and flashes to Basys 3 board over serial.
+* **Upload (`➜`)**: Compiles and flashes to GEMMrv32 target over serial.
 * **Theme Toggle**: Switch between Light and Dark mode on the fly.
 * **Sidebar**: Switch between File Explorer and the GEMM Coprocessor Workbench.
 
@@ -97,7 +97,7 @@ python3 gemm_dashboard.py --open-console --port /dev/ttyUSB1 -b 19200
 # Short flag / alias
 python3 gemm_dashboard.py console -p /dev/ttyUSB1 --baude 19200
 ```
-* **Type directly**: Keystrokes stream immediately to the FPGA.
+* **Type directly**: Keystrokes stream immediately to the target.
 * **`F3`**: Clear the screen.
 * **`F5`**: Reconnect serial port.
 * **`PgUp` / `PgDn`**: Scroll through historical logs.
@@ -113,8 +113,6 @@ python3 gemm_dashboard.py console -p /dev/ttyUSB1 --baude 19200
 | **Flash & Monitor** | `python3 gemm_dashboard.py flash <firmware.bin> --console` | Flashes firmware and immediately opens TUI console |
 | **Compile Project** | `python3 gemm_dashboard.py build -p <folder> [-O2\|-Os]` | Compiles project with bundled RISC-V GCC |
 | **List Serial Ports** | `python3 gemm_dashboard.py list-ports` | Lists physical UART ports (auto-filters dummy `ttyS` ports) |
-| **Program FPGA (JTAG)** | `python3 gemm_dashboard.py flash-bitstream` | Loads bitstream into Basys 3 SRAM via `openFPGALoader` |
-| **Program FPGA (SPI)** | `python3 gemm_dashboard.py flash-bitstream --spi-flash` | Writes bitstream to non-volatile SPI flash for persistent boot |
 
 ---
 

@@ -316,8 +316,8 @@ static {dtype_str} {name}_data[{m} * {stride}] __attribute__((aligned(4))) = {{
         layout.setSpacing(6)
 
         desc = QtWidgets.QLabel(
-            "Basys 3 has 64 KB DMEM. Plan systolic tiles to ensure buffer sizes\n"
-            "do not overflow SRAM budget during multi-layer inference."
+            "GEMMrv32 has 64 KB on-chip DMEM SRAM. Plan systolic tiles to ensure buffer sizes\n"
+            "do not overflow memory budget during multi-layer inference."
         )
         desc.setStyleSheet("font-size: 10px; color: #888888;")
         layout.addWidget(desc)
@@ -488,8 +488,8 @@ class ArduinoGEMMStudio(QtWidgets.QMainWindow):
         tb_layout.addWidget(lbl_board_tag)
 
         self.cmb_board = QtWidgets.QComboBox()
-        self.cmb_board.addItems(["GEMMrv32 Basys 3 (Artix-7 35T)"])
-        self.cmb_board.setFixedWidth(230)
+        self.cmb_board.addItems(["GEMMrv32 RISC-V SoC"])
+        self.cmb_board.setFixedWidth(200)
         tb_layout.addWidget(self.cmb_board)
 
         lbl_port_tag = QtWidgets.QLabel("Port:")
@@ -691,7 +691,7 @@ class ArduinoGEMMStudio(QtWidgets.QMainWindow):
         self.lbl_status = QtWidgets.QLabel("Ready")
         status.addWidget(self.lbl_status, 1)
 
-        self.lbl_toolchain = QtWidgets.QLabel(f"Toolchain: {GEMMEngine.find_riscv_prefix()} | Board: GEMMrv32 Basys 3")
+        self.lbl_toolchain = QtWidgets.QLabel(f"Toolchain: {GEMMEngine.find_riscv_prefix()} | Target: GEMMrv32 SoC")
         status.addPermanentWidget(self.lbl_toolchain)
 
     # -------------------------------------------------------------

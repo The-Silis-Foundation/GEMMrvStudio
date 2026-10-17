@@ -5,10 +5,9 @@ The Silis Foundation - Open-Source RISC-V SoC & Systolic GEMM Hardware Accelerat
 Provides programmatic & command-line APIs for:
   - Cross-platform toolchain discovery (Linux/macOS/Windows)
   - Compiling RISC-V projects to NEORV32-compatible raw binaries
-  - JTAG & SPI Flash FPGA bitstream loading via openFPGALoader
   - Bootloader handshake and firmware flashing over serial
   - UART terminal I/O & command sending
-  - Memory & BRAM budget calculation
+  - On-chip memory & SRAM budget calculation
   - Neural network image inference (28x28 digits / 32x32 vehicles)
   - Systolic Array CFS register parsing & telemetry
 """
@@ -106,35 +105,6 @@ class GEMMEngine:
                 if os.path.isfile(c):
                     return c
         return "make"
-
-    @classmethod
-    def find_openfpgaloader(cls):
-        """Finds openFPGALoader executable for FPGA JTAG programming."""
-        bin_path = shutil.which("openFPGALoader")
-        if bin_path:
-            return bin_path
-        candidates = [
-            os.path.expanduser("~/.local/bin/openFPGALoader"),
-            "/usr/local/bin/openFPGALoader",
-            "/usr/bin/openFPGALoader"
-        ]
-        for c in candidates:
-            if os.path.isfile(c) and os.access(c, os.X_OK):
-                return c
-        return None
-
-    @classmethod
-    def find_default_bitstream(cls):
-        """Finds precompiled FPGA bitstream for Basys 3."""
-        candidates = [
-            os.path.join(REPO_DIR, "..", "DOOM-on-GEMMrv32", "bit", "neorv32_basys3.bit"),
-            os.path.join(REPO_DIR, "..", "GEMMrv32", "sw", "basys", "build", "neorv32_basys3.bit"),
-            os.path.join(REPO_DIR, "bit", "neorv32_basys3.bit"),
-        ]
-        for c in candidates:
-            if os.path.isfile(c):
-                return os.path.abspath(c)
-        return ""
 
     @classmethod
     def get_default_port(cls):
@@ -357,50 +327,6 @@ include $(NEORV32_HOME)/sw/common/common.mk
         return {}
 
     # -------------------------------------------------------------
-    # FPGA Bitstream Flasher (openFPGALoader)
-    # -------------------------------------------------------------
-    @classmethod
-    def flash_bitstream(cls, bit_path, board="basys3", spi_flash=False, log_cb=None):
-        """
-        Flashes FPGA bitstream to Basys 3 via openFPGALoader.
-        If spi_flash is True, writes persistently to SPI flash (-f).
-        Otherwise loads directly into SRAM over JTAG.
-        """
-        def emit(msg):
-            if log_cb:
-                log_cb(msg)
-
-        if not bit_path or not os.path.isfile(bit_path):
-            return False, {"error": f"Bitstream file not found: {bit_path}"}
-
-        loader = cls.find_openfpgaloader()
-        if not loader:
-            return False, {"error": "openFPGALoader not found. Please install it or check ~/.local/bin."}
-
-        target_mode = "SPI Flash (persistent)" if spi_flash else "SRAM (instant JTAG)"
-        emit(f"[FPGA] Programming Basys 3 [{target_mode}] with {os.path.basename(bit_path)}...\n")
-
-        cmd = [loader, f"--board={board}"]
-        if spi_flash:
-            cmd.append("-f")
-        cmd.append(bit_path)
-
-        emit(f"[FPGA] Executing: {' '.join(cmd)}\n")
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        output_lines = []
-        for line in proc.stdout:
-            output_lines.append(line)
-            emit(line)
-        proc.wait()
-
-        if proc.returncode == 0:
-            emit(f"[FPGA SUCCESS] FPGA successfully programmed!\n")
-            return True, {"exit_code": 0, "log": "".join(output_lines)}
-        else:
-            emit(f"[FPGA ERROR] Programming failed with code {proc.returncode}.\n")
-            return False, {"error": f"openFPGALoader exited with code {proc.returncode}.", "log": "".join(output_lines)}
-
-    # -------------------------------------------------------------
     # Serial Port Management
     # -------------------------------------------------------------
     @staticmethod
@@ -483,7 +409,7 @@ include $(NEORV32_HOME)/sw/common/common.mk
                 bootloader_ready = True
 
         if not bootloader_ready:
-            emit("[FLASHER] Waiting for bootloader prompt / FPGA reset...\n")
+            emit("[FLASHER] Waiting for bootloader prompt / target reset...\n")
             t_end = time.time() + timeout_sec
             while time.time() < t_end:
                 flash_ser.write(b" \r\n")
@@ -495,7 +421,7 @@ include $(NEORV32_HOME)/sw/common/common.mk
 
         if not bootloader_ready:
             flash_ser.close()
-            return False, {"error": "Bootloader prompt CMD:> did not respond. Reset FPGA and retry."}
+            return False, {"error": "Bootloader prompt CMD:> did not respond. Reset GEMMrv32 target and retry."}
 
         emit("[FLASHER] Bootloader CMD:> ready. Uploading image...\n")
         with open(bin_path, "rb") as f:
@@ -660,13 +586,6 @@ def main():
     p_build.add_argument("--output", "-o", default=None, help="Output .bin file path")
     p_build.add_argument("--json", action="store_true", help="Output results in JSON format")
 
-    # Subcommand: flash-bitstream
-    p_fbit = subparsers.add_parser("flash-bitstream", help="Program Basys 3 FPGA bitstream via openFPGALoader")
-    p_fbit.add_argument("--bit", "-b", default=None, help="Path to .bit bitstream file")
-    p_fbit.add_argument("--board", default="basys3", help="Target FPGA board (default: basys3)")
-    p_fbit.add_argument("--spi-flash", action="store_true", help="Write to SPI flash (persistent)")
-    p_fbit.add_argument("--json", action="store_true", help="Output results in JSON format")
-
     # Subcommand: flash
     p_flash = subparsers.add_parser("flash", help="Flash binary firmware onto NEORV32 board")
     p_flash.add_argument("binary", nargs="?", default=None, help="Path to .bin file (positional)")
@@ -677,7 +596,7 @@ def main():
     p_flash.add_argument("--json", action="store_true", help="Output results in JSON format")
 
     # Subcommand: infer
-    p_infer = subparsers.add_parser("infer", help="Send test image to FPGA for neural network inference")
+    p_infer = subparsers.add_parser("infer", help="Send test image to GEMMrv32 SoC for neural network inference")
     p_infer.add_argument("--image", "-i", required=True, help="Path to image file (.png/.jpg)")
     p_infer.add_argument("--dataset", "-d", default="digits", choices=["digits", "vehicles"], help="Dataset type")
     p_infer.add_argument("--port", default=None, help="Serial port")
@@ -701,19 +620,6 @@ def main():
         ports = GEMMEngine.list_ports()
         print(json.dumps(ports, indent=2))
         sys.exit(0)
-
-    elif args.subcommand == "flash-bitstream":
-        bit_path = args.bit or GEMMEngine.find_default_bitstream()
-        def log_handler(msg):
-            if not args.json:
-                sys.stdout.write(msg)
-                sys.stdout.flush()
-
-        success, res = GEMMEngine.flash_bitstream(bit_path, board=args.board, spi_flash=args.spi_flash, log_cb=log_handler)
-        if args.json:
-            res["success"] = success
-            print(json.dumps(res, indent=2))
-        sys.exit(0 if success else 1)
 
     elif args.subcommand == "build":
         proj_dir = args.project
