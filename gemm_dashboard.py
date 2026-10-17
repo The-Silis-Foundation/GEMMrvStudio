@@ -198,8 +198,10 @@ class GEMMDevWorkbench(QtWidgets.QWidget):
       1. Memory Zero-Padding & Array Header Scaffolder
       2. Tiling & SRAM Scratchpad Budget Planner
     """
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, studio=None):
         super().__init__(parent)
+        self.studio = studio
+        self.last_generated_header = ""
         self.init_ui()
 
     def init_ui(self):
@@ -276,6 +278,43 @@ class GEMMDevWorkbench(QtWidgets.QWidget):
         self.txt_quant_preview.setPlaceholderText("C header preview will appear here...")
         layout.addWidget(self.txt_quant_preview)
 
+        # Action Buttons: Save to Project & Copy
+        btn_box = QtWidgets.QHBoxLayout()
+        self.btn_save_weights = QtWidgets.QPushButton("Save weights.h to Project")
+        self.btn_save_weights.setStyleSheet(
+            "background-color: #2b78e4; color: #ffffff; font-weight: bold; padding: 5px; border-radius: 3px;"
+        )
+        self.btn_save_weights.clicked.connect(self.save_weights_to_project)
+        btn_box.addWidget(self.btn_save_weights)
+
+        self.btn_copy_weights = QtWidgets.QPushButton("Copy Header")
+        self.btn_copy_weights.clicked.connect(self.copy_weights_to_clipboard)
+        btn_box.addWidget(self.btn_copy_weights)
+        layout.addLayout(btn_box)
+
+    def save_weights_to_project(self):
+        text = self.txt_quant_preview.toPlainText().strip()
+        if not text:
+            return
+        if self.studio and getattr(self.studio, "current_proj_dir", None):
+            out_file = os.path.join(self.studio.current_proj_dir, "model_weights.h")
+            try:
+                with open(out_file, "w", encoding="utf-8") as f:
+                    f.write(text)
+                if hasattr(self.studio, "lbl_status"):
+                    self.studio.lbl_status.setText(f"Exported: {os.path.basename(out_file)}")
+                if hasattr(self.studio, "load_project"):
+                    self.studio.load_project(self.studio.current_proj_dir)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Save Error", f"Could not save weights.h:\n{e}")
+
+    def copy_weights_to_clipboard(self):
+        text = self.txt_quant_preview.toPlainText()
+        if text:
+            QtWidgets.QApplication.clipboard().setText(text)
+            if self.studio and hasattr(self.studio, "lbl_status"):
+                self.studio.lbl_status.setText("Weights header copied to clipboard.")
+
     def browse_weight_file(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Select Tensor or Model File", "", "Tensors & Models (*.npy *.npz *.tflite *.bin);;All Files (*)"
@@ -285,11 +324,12 @@ class GEMMDevWorkbench(QtWidgets.QWidget):
 
     def run_quantize_and_export(self):
         fpath = self.txt_weight_path.text().strip()
+        target_bits = 16 if self.cmb_q_bits.currentIndex() == 1 else 8
         if not fpath:
             # Generate demonstration quantized layer
             import numpy as np
             mock_tensor = np.random.randn(32, 64).astype(np.float32) * 0.5
-            q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(mock_tensor)
+            q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(mock_tensor, target_bits=target_bits)
             padded, orig_shape, stride = GEMMQuantizer.pad_to_systolic_stride(q_arr)
             tensors = {
                 "demo_dense_weight": {
@@ -302,7 +342,7 @@ class GEMMDevWorkbench(QtWidgets.QWidget):
             }
             hdr = GEMMQuantizer.export_c_header(tensors, None, self.txt_model_name.text().strip() or "MODEL")
             self.txt_quant_preview.setPlainText(
-                "// [NOTE] No file selected: Displaying synthetic 32x64 quantized layer preview.\n\n" + hdr
+                f"// [NOTE] No file selected: Displaying synthetic 32x64 quantized {target_bits}-bit layer preview.\n\n" + hdr
             )
             return
 
@@ -319,7 +359,7 @@ class GEMMDevWorkbench(QtWidgets.QWidget):
                 arr = np.load(fpath)
                 if arr.ndim == 1:
                     arr = arr.reshape(1, -1)
-                q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(arr)
+                q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(arr, target_bits=target_bits)
                 padded, orig_shape, stride = GEMMQuantizer.pad_to_systolic_stride(q_arr)
                 tensors[name_base] = {
                     "data": padded,
@@ -334,7 +374,7 @@ class GEMMDevWorkbench(QtWidgets.QWidget):
                     arr = archive[k]
                     if arr.ndim == 1:
                         arr = arr.reshape(1, -1)
-                    q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(arr)
+                    q_arr, scale, (mult, shift) = GEMMQuantizer.quantize_symmetric(arr, target_bits=target_bits)
                     padded, orig_shape, stride = GEMMQuantizer.pad_to_systolic_stride(q_arr)
                     tensors[f"{name_base}_{k}"] = {
                         "data": padded,
@@ -392,7 +432,40 @@ class GEMMDevWorkbench(QtWidgets.QWidget):
         self.txt_nn_code.setFont(QtGui.QFont("Monospace", 9))
         layout.addWidget(self.txt_nn_code)
 
+        # Action Buttons: Insert into Editor & Copy
+        nn_btn_box = QtWidgets.QHBoxLayout()
+        self.btn_insert_nn = QtWidgets.QPushButton("Insert at Cursor in Editor")
+        self.btn_insert_nn.setStyleSheet(
+            "background-color: #00979c; color: #ffffff; font-weight: bold; padding: 5px; border-radius: 3px;"
+        )
+        self.btn_insert_nn.clicked.connect(self.insert_nn_to_editor)
+        nn_btn_box.addWidget(self.btn_insert_nn)
+
+        self.btn_copy_nn = QtWidgets.QPushButton("Copy Template")
+        self.btn_copy_nn.clicked.connect(self.copy_nn_to_clipboard)
+        nn_btn_box.addWidget(self.btn_copy_nn)
+        layout.addLayout(nn_btn_box)
+
         self.update_nn_codegen()
+
+    def insert_nn_to_editor(self):
+        text = self.txt_nn_code.toPlainText()
+        if not text or not self.studio or not hasattr(self.studio, "editor_tabs"):
+            return
+        idx = self.studio.editor_tabs.currentIndex()
+        if idx >= 0:
+            sci = self.studio.editor_tabs.widget(idx)
+            if sci:
+                sci.insert(text)
+                if hasattr(self.studio, "lbl_status"):
+                    self.studio.lbl_status.setText("Layer template inserted into current file.")
+
+    def copy_nn_to_clipboard(self):
+        text = self.txt_nn_code.toPlainText()
+        if text:
+            QtWidgets.QApplication.clipboard().setText(text)
+            if self.studio and hasattr(self.studio, "lbl_status"):
+                self.studio.lbl_status.setText("Layer template copied to clipboard.")
 
     def update_nn_codegen(self):
         idx = self.cmb_nn_layer.currentIndex()
@@ -498,13 +571,13 @@ gemmrv_nn_attention_s8(
 
         grid.addWidget(QtWidgets.QLabel("Rows (M):"), 1, 0)
         self.spn_m = QtWidgets.QSpinBox()
-        self.spn_m.setRange(1, 255)
+        self.spn_m.setRange(1, 4096)
         self.spn_m.setValue(10)
         grid.addWidget(self.spn_m, 1, 1)
 
         grid.addWidget(QtWidgets.QLabel("Cols (K/N):"), 2, 0)
         self.spn_k = QtWidgets.QSpinBox()
-        self.spn_k.setRange(1, 255)
+        self.spn_k.setRange(1, 4096)
         self.spn_k.setValue(14)
         grid.addWidget(self.spn_k, 2, 1)
 
@@ -849,7 +922,7 @@ class ArduinoGEMMStudio(QtWidgets.QMainWindow):
         self.sidebar_stack.addWidget(self.page_explorer)
 
         # Page 1: GEMM Workbench
-        self.gemm_workbench = GEMMDevWorkbench()
+        self.gemm_workbench = GEMMDevWorkbench(studio=self)
         self.sidebar_stack.addWidget(self.gemm_workbench)
 
         self.h_splitter.addWidget(self.sidebar_stack)

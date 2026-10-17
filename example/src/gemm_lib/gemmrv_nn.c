@@ -77,8 +77,10 @@ void gemmrv_nn_dense_s8(
             int cur_n = (N - n < 64) ? (N - n) : 64;
             int cur_n_stride = (cur_n + 7) & ~7;
 
+            // Ensure column offset is 8-byte aligned for systolic CFS DMA
+            int n_aligned = n & ~7;
             gemmrv_mat subA = GEMMRV_MAT(&in[m * in_stride], 1, K, in_stride);
-            gemmrv_mat subB = GEMMRV_MAT(&weights[n], K, cur_n, weight_stride);
+            gemmrv_mat subB = GEMMRV_MAT(&weights[n_aligned], K, cur_n, weight_stride);
             gemmrv_mat_out subC = GEMMRV_MAT_OUT(accum_row, 1, cur_n, cur_n_stride);
 
             gemmrv_mult(&subA, &subB, &subC);
@@ -123,9 +125,10 @@ void gemmrv_nn_conv2d_s8(
     int k_dim_padded = (k_dim + 7) & ~7;
     int out_c_padded = (out_c + 7) & ~7;
 
-    // Buffer for one im2col patch
-    int8_t col_patch[128] __attribute__((aligned(4)));
-    int32_t accum_out[64] __attribute__((aligned(4)));
+    // Expand buffer for larger filter receptive fields (up to 1024 elements)
+    #define MAX_CONV_PATCH 1024
+    int8_t col_patch[MAX_CONV_PATCH] __attribute__((aligned(4)));
+    int32_t accum_out[128] __attribute__((aligned(4)));
 
     for (int oh = 0; oh < out_h; oh++) {
         for (int ow = 0; ow < out_w; ow++) {
@@ -137,18 +140,22 @@ void gemmrv_nn_conv2d_s8(
                     int iw = ow * stride_w - pad_w + kw;
                     if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
                         for (int c = 0; c < in_c; c++) {
-                            col_patch[patch_idx++] = in[(ih * in_w + iw) * in_c + c];
+                            if (patch_idx < MAX_CONV_PATCH) {
+                                col_patch[patch_idx++] = in[(ih * in_w + iw) * in_c + c];
+                            }
                         }
                     } else {
                         // Zero padding
                         for (int c = 0; c < in_c; c++) {
-                            col_patch[patch_idx++] = 0;
+                            if (patch_idx < MAX_CONV_PATCH) {
+                                col_patch[patch_idx++] = 0;
+                            }
                         }
                     }
                 }
             }
             // Pad patch up to systolic stride multiple of 8
-            while (patch_idx < k_dim_padded && patch_idx < 128) {
+            while (patch_idx < k_dim_padded && patch_idx < MAX_CONV_PATCH) {
                 col_patch[patch_idx++] = 0;
             }
 
@@ -187,9 +194,11 @@ void gemmrv_nn_attention_s8(
     int stride_v = (d_v + 7) & ~7;
     int stride_s = (seq_len + 7) & ~7;
 
-    // Buffer for scores row
-    int32_t raw_scores[64] __attribute__((aligned(4)));
-    int8_t attn_weights[64] __attribute__((aligned(4)));
+    // Buffer for scores row up to 256 tokens
+    #define MAX_ATTN_SEQ 256
+    int32_t raw_scores[MAX_ATTN_SEQ] __attribute__((aligned(4)));
+    int8_t attn_weights[MAX_ATTN_SEQ] __attribute__((aligned(4)));
+    int32_t out_accum[128] __attribute__((aligned(4)));
 
     for (int i = 0; i < seq_len; i++) {
         // Step 1: Compute Q_i * K^T (Systolic acceleration)
@@ -209,7 +218,6 @@ void gemmrv_nn_attention_s8(
         gemmrv_nn_softmax_s8(attn_weights, seq_len);
 
         // Step 3: Attention * V (Systolic acceleration)
-        int32_t out_accum[64] __attribute__((aligned(4)));
         gemmrv_mat a_row = GEMMRV_MAT(attn_weights, 1, seq_len, stride_s);
         gemmrv_mat v_mat = GEMMRV_MAT(V, seq_len, d_v, stride_v);
         gemmrv_mat_out out_mat = GEMMRV_MAT_OUT(out_accum, 1, d_v, stride_v);
@@ -270,7 +278,6 @@ int gemmrv_nn_argmax_s8(const int8_t* vec, int size) {
 }
 
 void gemmrv_nn_softmax_s8(int8_t* vec, int size) {
-    // Fast integer-approx softmax: subtract max, exp lookup/shift, normalize
     if (size <= 0) return;
     int8_t max_val = vec[0];
     for (int i = 1; i < size; i++) {
@@ -278,14 +285,14 @@ void gemmrv_nn_softmax_s8(int8_t* vec, int size) {
     }
 
     int32_t sum = 0;
-    int32_t exp_vals[64];
-    int count = (size > 64) ? 64 : size;
+    int32_t exp_vals[256];
+    int count = (size > 256) ? 256 : size;
 
     for (int i = 0; i < count; i++) {
         int diff = (int)vec[i] - (int)max_val; // <= 0
-        // Approximation: 2^(diff / 16)
         int shift = (-diff) >> 3;
-        int32_t val = (shift < 16) ? (256 >> shift) : 0;
+        // Ensure base probability floor so lower non-max tokens do not collapse completely
+        int32_t val = (shift < 16) ? (256 >> shift) : 1;
         exp_vals[i] = val;
         sum += val;
     }

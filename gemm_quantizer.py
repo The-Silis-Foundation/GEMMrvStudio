@@ -14,53 +14,64 @@ import os
 import sys
 import math
 import struct
-import json
+import re
 import numpy as np
 
 
 class GEMMQuantizer:
     @staticmethod
+    def sanitize_c_identifier(name: str) -> str:
+        """Sanitizes any string into a valid C language identifier."""
+        clean = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+        if clean and clean[0].isdigit():
+            clean = "_" + clean
+        return clean or "tensor"
+
+    @staticmethod
     def quantize_symmetric(tensor: np.ndarray, target_bits=8):
         """
         Performs symmetric linear quantization on a floating point tensor.
-        Maps [-max_abs, +max_abs] to [-127, +127].
-        Returns:
-            q_tensor (np.int8), scale (float), (quant_mult, quant_shift)
+        target_bits=8  -> maps to [-127, +127] (int8_t)
+        target_bits=16 -> maps to [-32767, +32767] (int16_t)
         """
         arr = np.asarray(tensor, dtype=np.float32)
         max_val = float(np.max(np.abs(arr)))
+        target_dtype = np.int16 if target_bits == 16 else np.int8
+
         if max_val == 0.0:
             scale = 1.0
-            q_tensor = np.zeros_like(arr, dtype=np.int8)
+            q_tensor = np.zeros_like(arr, dtype=target_dtype)
             return q_tensor, scale, (1, 0)
 
-        q_max = (1 << (target_bits - 1)) - 1  # 127 for int8
+        q_max = (1 << (target_bits - 1)) - 1
         scale = max_val / q_max
 
         q_arr = np.round(arr / scale)
-        q_arr = np.clip(q_arr, -q_max - 1, q_max).astype(np.int8)
+        q_arr = np.clip(q_arr, -q_max - 1, q_max).astype(target_dtype)
 
-        # Compute fixed-point multiplier (16-bit) and right shift
-        # Effective multiplier = 1.0 / scale
+        # Standard Q16 fixed point multiplier and right shift
         mult, shift = GEMMQuantizer.compute_fixed_point_scale(scale)
-
         return q_arr, scale, (mult, shift)
 
     @staticmethod
     def compute_fixed_point_scale(scale: float):
         """
         Converts float scale to integer multiplier (Q16) and right shift.
-        value * multiplier >> (16 + shift)
+        Formula: value * multiplier >> (16 + shift)
         """
         if scale == 0:
             return 1, 0
         inv_scale = 1.0 / scale
         shift = 0
-        while inv_scale < 1.0 and shift < 16:
+        while inv_scale < 0.5 and shift < 16:
             inv_scale *= 2.0
             shift += 1
-        mult = int(round(inv_scale * 32768.0))
-        return mult, shift
+        while inv_scale >= 1.0 and shift > -16:
+            inv_scale /= 2.0
+            shift -= 1
+        # Q16 format (scaled by 65536)
+        mult = int(round(inv_scale * 65536.0))
+        return mult, max(0, shift)
 
     @staticmethod
     def pad_to_systolic_stride(matrix_2d: np.ndarray, stride_multiple=8):
@@ -100,15 +111,22 @@ class GEMMQuantizer:
         lines.append(f" * Model: {model_name}")
         lines.append(f" * Hardware: 8x8 Systolic Array Coprocessor (int8 native)")
         lines.append(" */\n")
-        lines.append(f"#ifndef {model_name.upper()}_WEIGHTS_H")
-        lines.append(f"#define {model_name.upper()}_WEIGHTS_H\n")
+        guard_name = GEMMQuantizer.sanitize_c_identifier(model_name).upper()
+        lines.append(f"#ifndef {guard_name}_WEIGHTS_H")
+        lines.append(f"#define {guard_name}_WEIGHTS_H\n")
         lines.append("#include <stdint.h>\n")
 
-        for name, meta in tensors_dict.items():
+        for raw_name, meta in tensors_dict.items():
+            name = GEMMQuantizer.sanitize_c_identifier(raw_name)
             data = meta["data"]
             orig_shape = meta.get("original_shape", data.shape)
             stride = meta.get("stride", data.shape[-1] if len(data.shape) > 1 else len(data))
-            dtype_c = "int8_t" if data.dtype == np.int8 else "int32_t"
+            if data.dtype == np.int8:
+                dtype_c = "int8_t"
+            elif data.dtype == np.int16:
+                dtype_c = "int16_t"
+            else:
+                dtype_c = "int32_t"
 
             lines.append(f"/* Layer: {name} (Shape: {orig_shape}, Stride: {stride}) */")
             if "quant_mult" in meta:
@@ -125,13 +143,15 @@ class GEMMQuantizer:
                 chunk = flat_data[i:i+16]
                 if dtype_c == "int8_t":
                     items = ", ".join(f"{int(x):4d}" for x in chunk)
-                else:
+                elif dtype_c == "int16_t":
                     items = ", ".join(f"{int(x):6d}" for x in chunk)
+                else:
+                    items = ", ".join(f"{int(x):8d}" for x in chunk)
                 row_chunks.append(f"    {items}")
             lines.append(",\n".join(row_chunks))
             lines.append("};\n")
 
-        lines.append(f"#endif // {model_name.upper()}_WEIGHTS_H\n")
+        lines.append(f"#endif // {guard_name}_WEIGHTS_H\n")
 
         content = "\n".join(lines)
         if out_header_path:
