@@ -153,7 +153,7 @@ class GEMMEngine:
 
         if uses_gemm:
             rel_gemm = os.path.relpath(DEFAULT_GEMM_LIB_DIR, proj_dir)
-            c_sources += f" {rel_gemm}/gemmrv_hw.c"
+            c_sources += f" {rel_gemm}/gemmrv_hw.c {rel_gemm}/gemmrv_nn.c"
 
         neorv32_home = cls.find_neorv32_home()
         riscv_prefix = cls.find_riscv_prefix()
@@ -167,7 +167,7 @@ EFFORT ?= -O2
 APP_SRC ?= {c_sources}
 APP_INC += -I . -I {DEFAULT_GEMM_LIB_DIR}
 
-# Basys 3 BRAM configuration (128 KB ROM, 64 KB RAM)
+# GEMMrv32 On-Chip SRAM Configuration (128 KB IMEM, 64 KB DMEM)
 USER_FLAGS += -Wl,--defsym,__neorv32_rom_size=128k
 USER_FLAGS += -Wl,--defsym,__neorv32_ram_size=64k
 

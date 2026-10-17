@@ -26,7 +26,7 @@ int gemmrv_nn_init(void) {
 }
 
 uint64_t gemmrv_nn_get_cycles(void) {
-    return neorv32_cpu_get_systime();
+    return neorv32_cpu_get_cycle();
 }
 
 void gemmrv_nn_dense_s8(
