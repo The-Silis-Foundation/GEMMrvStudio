@@ -56,22 +56,25 @@ class GEMMQuantizer:
     @staticmethod
     def compute_fixed_point_scale(scale: float):
         """
-        Converts float scale to integer multiplier (Q16) and right shift.
-        Formula: value * multiplier >> (16 + shift)
+        Converts float scale to integer multiplier (Q16) and non-negative right shift.
+        In C inference:
+          val = (int32_t)(((int64_t)val * quant_scale) >> 16);
+          if (quant_shift > 0) val = val >> quant_shift;
+        Effective scaling: val * (quant_scale / 65536) / (2^quant_shift)
         """
-        if scale == 0:
+        if scale <= 0.0:
             return 1, 0
         inv_scale = 1.0 / scale
         shift = 0
-        while inv_scale < 0.5 and shift < 16:
-            inv_scale *= 2.0
-            shift += 1
-        while inv_scale >= 1.0 and shift > -16:
+        # Normalize inv_scale so multiplier fits cleanly in positive 16-bit range [16384, 32767]
+        while inv_scale >= 1.0 and shift < 30:
             inv_scale /= 2.0
-            shift -= 1
-        # Q16 format (scaled by 65536)
+            shift += 1
         mult = int(round(inv_scale * 65536.0))
-        return mult, max(0, shift)
+        if mult > 65535:
+            mult >>= 1
+            shift += 1
+        return max(1, mult), max(0, shift)
 
     @staticmethod
     def pad_to_systolic_stride(matrix_2d: np.ndarray, stride_multiple=8):

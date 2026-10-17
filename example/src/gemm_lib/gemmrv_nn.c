@@ -77,10 +77,9 @@ void gemmrv_nn_dense_s8(
             int cur_n = (N - n < 64) ? (N - n) : 64;
             int cur_n_stride = (cur_n + 7) & ~7;
 
-            // Ensure column offset is 8-byte aligned for systolic CFS DMA
-            int n_aligned = n & ~7;
+            // n is stepped in multiples of 64 (or 8), so &weights[n] maintains row-major column offset
             gemmrv_mat subA = GEMMRV_MAT(&in[m * in_stride], 1, K, in_stride);
-            gemmrv_mat subB = GEMMRV_MAT(&weights[n_aligned], K, cur_n, weight_stride);
+            gemmrv_mat subB = GEMMRV_MAT(&weights[n], K, cur_n, weight_stride);
             gemmrv_mat_out subC = GEMMRV_MAT_OUT(accum_row, 1, cur_n, cur_n_stride);
 
             gemmrv_mult(&subA, &subB, &subC);
@@ -121,14 +120,16 @@ void gemmrv_nn_conv2d_s8(
 ) {
     int out_h = (in_h + 2 * pad_h - kernel_h) / stride_h + 1;
     int out_w = (in_w + 2 * pad_w - kernel_w) / stride_w + 1;
+    if (out_h <= 0 || out_w <= 0) return;
+
     int k_dim = kernel_h * kernel_w * in_c;
     int k_dim_padded = (k_dim + 7) & ~7;
-    int out_c_padded = (out_c + 7) & ~7;
+    int out_c_stride = (out_c + 7) & ~7;
 
-    // Expand buffer for larger filter receptive fields (up to 1024 elements)
+    // Expand buffer for filter receptive fields (up to 1024 elements)
     #define MAX_CONV_PATCH 1024
     int8_t col_patch[MAX_CONV_PATCH] __attribute__((aligned(4)));
-    int32_t accum_out[128] __attribute__((aligned(4)));
+    int32_t accum_out[64] __attribute__((aligned(4)));
 
     for (int oh = 0; oh < out_h; oh++) {
         for (int ow = 0; ow < out_w; ow++) {
@@ -159,24 +160,31 @@ void gemmrv_nn_conv2d_s8(
                 col_patch[patch_idx++] = 0;
             }
 
-            // Multiply patch against weights using GEMM coprocessor
+            // Tile over out_c in blocks of up to 64 to avoid stack buffer overflow
             gemmrv_mat matPatch = GEMMRV_MAT(col_patch, 1, k_dim, k_dim_padded);
-            gemmrv_mat matWeights = GEMMRV_MAT(weights, k_dim, out_c, out_c_padded);
-            gemmrv_mat_out matOut = GEMMRV_MAT_OUT(accum_out, 1, out_c, out_c_padded);
 
-            gemmrv_mult(&matPatch, &matWeights, &matOut);
+            for (int oc_start = 0; oc_start < out_c; oc_start += 64) {
+                int cur_oc = (out_c - oc_start < 64) ? (out_c - oc_start) : 64;
+                int cur_oc_stride = (cur_oc + 7) & ~7;
 
-            // Requantize and write back
-            for (int oc = 0; oc < out_c; oc++) {
-                int32_t val = accum_out[oc];
-                if (bias) val += bias[oc];
-                if (act_relu && val < 0) val = 0;
-                if (quant_scale != 1) {
-                    val = (int32_t)(((int64_t)val * quant_scale) >> 16);
+                gemmrv_mat matWeights = GEMMRV_MAT(&weights[oc_start], k_dim, cur_oc, out_c_stride);
+                gemmrv_mat_out matOut = GEMMRV_MAT_OUT(accum_out, 1, cur_oc, cur_oc_stride);
+
+                gemmrv_mult(&matPatch, &matWeights, &matOut);
+
+                // Requantize and write back
+                for (int i = 0; i < cur_oc; i++) {
+                    int oc = oc_start + i;
+                    int32_t val = accum_out[i];
+                    if (bias) val += bias[oc];
+                    if (act_relu && val < 0) val = 0;
+                    if (quant_scale != 1) {
+                        val = (int32_t)(((int64_t)val * quant_scale) >> 16);
+                    }
+                    if (quant_shift > 0) val = val >> quant_shift;
+
+                    out[(oh * out_w + ow) * out_c + oc] = saturate_s8(val);
                 }
-                if (quant_shift > 0) val = val >> quant_shift;
-
-                out[(oh * out_w + ow) * out_c + oc] = saturate_s8(val);
             }
         }
     }
@@ -196,30 +204,45 @@ void gemmrv_nn_attention_s8(
 
     // Buffer for scores row up to 256 tokens
     #define MAX_ATTN_SEQ 256
+    #define MAX_ATTN_DK  64
     int32_t raw_scores[MAX_ATTN_SEQ] __attribute__((aligned(4)));
     int8_t attn_weights[MAX_ATTN_SEQ] __attribute__((aligned(4)));
     int32_t out_accum[128] __attribute__((aligned(4)));
 
-    for (int i = 0; i < seq_len; i++) {
-        // Step 1: Compute Q_i * K^T (Systolic acceleration)
-        gemmrv_mat q_row = GEMMRV_MAT(&Q[i * stride_k], 1, d_k, stride_k);
-        gemmrv_mat k_mat = GEMMRV_MAT(K, seq_len, d_k, stride_k); // K transposed in memory layout
-        gemmrv_mat_out score_out = GEMMRV_MAT_OUT(raw_scores, 1, seq_len, stride_s);
+    // Transpose K into [d_k x seq_len] with stride_s so systolic GEMM can compute Q[1 x d_k] * K_T[d_k x seq_len]
+    int8_t K_T[MAX_ATTN_DK * MAX_ATTN_SEQ] __attribute__((aligned(4)));
+    int actual_dk = (d_k > MAX_ATTN_DK) ? MAX_ATTN_DK : d_k;
+    int actual_seq = (seq_len > MAX_ATTN_SEQ) ? MAX_ATTN_SEQ : seq_len;
+
+    for (int k = 0; k < actual_dk; k++) {
+        for (int s = 0; s < actual_seq; s++) {
+            K_T[k * stride_s + s] = K[s * stride_k + k];
+        }
+        for (int s = actual_seq; s < stride_s; s++) {
+            K_T[k * stride_s + s] = 0;
+        }
+    }
+
+    for (int i = 0; i < actual_seq; i++) {
+        // Step 1: Compute Q_i * K^T (Systolic acceleration: [1 x d_k] * [d_k x seq_len] -> [1 x seq_len])
+        gemmrv_mat q_row = GEMMRV_MAT(&Q[i * stride_k], 1, actual_dk, stride_k);
+        gemmrv_mat k_mat = GEMMRV_MAT(K_T, actual_dk, actual_seq, stride_s);
+        gemmrv_mat_out score_out = GEMMRV_MAT_OUT(raw_scores, 1, actual_seq, stride_s);
 
         gemmrv_mult(&q_row, &k_mat, &score_out);
 
         // Step 2: Scale and Softmax
-        for (int j = 0; j < seq_len; j++) {
+        for (int j = 0; j < actual_seq; j++) {
             int32_t s = raw_scores[j];
             if (qk_scale != 1) s = (int32_t)(((int64_t)s * qk_scale) >> 16);
             if (qk_shift > 0) s = s >> qk_shift;
             attn_weights[j] = saturate_s8(s);
         }
-        gemmrv_nn_softmax_s8(attn_weights, seq_len);
+        gemmrv_nn_softmax_s8(attn_weights, actual_seq);
 
-        // Step 3: Attention * V (Systolic acceleration)
-        gemmrv_mat a_row = GEMMRV_MAT(attn_weights, 1, seq_len, stride_s);
-        gemmrv_mat v_mat = GEMMRV_MAT(V, seq_len, d_v, stride_v);
+        // Step 3: Attention * V (Systolic acceleration: [1 x seq_len] * [seq_len x d_v] -> [1 x d_v])
+        gemmrv_mat a_row = GEMMRV_MAT(attn_weights, 1, actual_seq, stride_s);
+        gemmrv_mat v_mat = GEMMRV_MAT(V, actual_seq, d_v, stride_v);
         gemmrv_mat_out out_mat = GEMMRV_MAT_OUT(out_accum, 1, d_v, stride_v);
 
         gemmrv_mult(&a_row, &v_mat, &out_mat);

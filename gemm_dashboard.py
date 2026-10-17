@@ -10,6 +10,7 @@ import glob
 import math
 import time
 import re
+import json
 import serial
 import serial.tools.list_ports
 from PyQt5 import QtCore, QtGui, QtWidgets, QtSvg
