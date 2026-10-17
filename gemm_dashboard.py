@@ -506,6 +506,15 @@ class ArduinoGEMMStudio(QtWidgets.QMainWindow):
         btn_rescan.clicked.connect(self.refresh_ports)
         tb_layout.addWidget(btn_rescan)
 
+        lbl_opt_tag = QtWidgets.QLabel("Opt:")
+        lbl_opt_tag.setStyleSheet("font-size: 11px; font-weight: bold; color: #888888;")
+        tb_layout.addWidget(lbl_opt_tag)
+
+        self.cmb_opt = QtWidgets.QComboBox()
+        self.cmb_opt.addItems(["-Os (Size / DOOM)", "-O2 (Speed)", "-O3 (Max Speed)", "-O0 (Debug)"])
+        self.cmb_opt.setFixedWidth(135)
+        tb_layout.addWidget(self.cmb_opt)
+
         tb_layout.addStretch()
 
         # Theme toggle button (Dark / Light)
@@ -929,8 +938,9 @@ class ArduinoGEMMStudio(QtWidgets.QMainWindow):
 
         target_name = os.path.basename(os.path.normpath(self.current_proj_dir))
         out_bin = os.path.join(DEFAULT_BINS_DIR, f"{target_name}.bin")
+        opt = self.cmb_opt.currentText().split()[0] if hasattr(self, "cmb_opt") else "-Os"
 
-        self.build_thread = BuildWorker(self.current_proj_dir, opt_level="-O2", out_bin=out_bin)
+        self.build_thread = BuildWorker(self.current_proj_dir, opt_level=opt, out_bin=out_bin)
         self.build_thread.log_signal.connect(self.append_output_log)
         self.build_thread.done_signal.connect(self.on_build_done)
         self.build_thread.start()
@@ -956,8 +966,9 @@ class ArduinoGEMMStudio(QtWidgets.QMainWindow):
 
         target_name = os.path.basename(os.path.normpath(self.current_proj_dir))
         out_bin = os.path.join(DEFAULT_BINS_DIR, f"{target_name}.bin")
+        opt = self.cmb_opt.currentText().split()[0] if hasattr(self, "cmb_opt") else "-Os"
 
-        self.build_thread = BuildWorker(self.current_proj_dir, opt_level="-O2", out_bin=out_bin)
+        self.build_thread = BuildWorker(self.current_proj_dir, opt_level=opt, out_bin=out_bin)
         self.build_thread.log_signal.connect(self.append_output_log)
         self.build_thread.done_signal.connect(lambda s, r: self.on_upload_build_done(s, r, out_bin))
         self.build_thread.start()

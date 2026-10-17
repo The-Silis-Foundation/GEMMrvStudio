@@ -669,9 +669,11 @@ def main():
 
     # Subcommand: flash
     p_flash = subparsers.add_parser("flash", help="Flash binary firmware onto NEORV32 board")
-    p_flash.add_argument("--bin", "-b", required=True, help="Path to .bin file")
-    p_flash.add_argument("--port", default=None, help="Serial port (e.g., /dev/ttyUSB1)")
-    p_flash.add_argument("--baud", type=int, default=19200, help="Baud rate (default 19200)")
+    p_flash.add_argument("binary", nargs="?", default=None, help="Path to .bin file (positional)")
+    p_flash.add_argument("--bin", "-b", dest="bin_opt", default=None, help="Path to .bin file (flag)")
+    p_flash.add_argument("--port", "-p", default=None, help="Serial port (e.g., /dev/ttyUSB1)")
+    p_flash.add_argument("--baud", "-baude", "--baude", type=int, default=19200, help="Baud rate (default 19200)")
+    p_flash.add_argument("--console", "--open-console", "-c", action="store_true", help="Launch interactive TUI console immediately after flashing")
     p_flash.add_argument("--json", action="store_true", help="Output results in JSON format")
 
     # Subcommand: infer
@@ -732,16 +734,26 @@ def main():
         sys.exit(0 if success else 1)
 
     elif args.subcommand == "flash":
+        bin_path = args.binary or args.bin_opt
+        if not bin_path:
+            sys.stderr.write("error: please provide binary file as argument or via --bin/-b\n")
+            sys.exit(2)
+
         engine = GEMMEngine(port=args.port, baud=args.baud)
         def log_handler(msg):
             if not args.json:
                 sys.stdout.write(msg)
                 sys.stdout.flush()
 
-        success, res = engine.flash_binary(args.bin, log_cb=log_handler)
+        success, res = engine.flash_binary(bin_path, log_cb=log_handler)
         if args.json:
             res["success"] = success
             print(json.dumps(res, indent=2))
+
+        if success and args.console:
+            from gemm_tui import launch_console
+            launch_console(port=engine.port, baud=engine.baud)
+
         sys.exit(0 if success else 1)
 
     elif args.subcommand == "infer":

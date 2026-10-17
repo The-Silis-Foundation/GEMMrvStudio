@@ -103,25 +103,64 @@ python3 gemm_dashboard.py console -p /dev/ttyUSB1 --baude 19200
 * **`PgUp` / `PgDn`**: Scroll through historical logs.
 * **`Ctrl+C`**: Cleanly exit the console.
 
-### 3. Headless CLI Commands
-All core operations can be run headlessly or in CI/scripts:
+### 3. CLI Command Reference Table
 
+| Task | Command Syntax | Description |
+| :--- | :--- | :--- |
+| **Launch IDE GUI** | `python3 gemm_dashboard.py` | Starts PyQt5 / QScintilla IDE (Arduino 2.x theme) |
+| **Open TUI Console** | `python3 gemm_dashboard.py --open-console` | Opens interactive full-screen streaming terminal |
+| **Flash Firmware** | `python3 gemm_dashboard.py flash <firmware.bin>` | Streams binary to NEORV32 bootloader and executes |
+| **Flash & Monitor** | `python3 gemm_dashboard.py flash <firmware.bin> --console` | Flashes firmware and immediately opens TUI console |
+| **Compile Project** | `python3 gemm_dashboard.py build -p <folder> [-O2\|-Os]` | Compiles project with bundled RISC-V GCC |
+| **List Serial Ports** | `python3 gemm_dashboard.py list-ports` | Lists physical UART ports (auto-filters dummy `ttyS` ports) |
+| **Program FPGA (JTAG)** | `python3 gemm_dashboard.py flash-bitstream` | Loads bitstream into Basys 3 SRAM via `openFPGALoader` |
+| **Program FPGA (SPI)** | `python3 gemm_dashboard.py flash-bitstream --spi-flash` | Writes bitstream to non-volatile SPI flash for persistent boot |
+
+---
+
+### 4. CLI Arguments & Flags Breakdown
+
+#### `flash` Subcommand
 ```bash
-# List available hardware serial ports (filters out dummy ttyS ports)
-python3 gemm_dashboard.py list-ports
-
-# Compile a project (e.g. demo_gemm, demo_blink_led, or DOOM)
-python3 gemm_dashboard.py build --project example/src/demo_gemm --opt=-O2 --json
-
-# Flash binary firmware to board over serial bootloader
-python3 gemm_dashboard.py flash --bin example/bin/demo_gemm.bin --port /dev/ttyUSB1 --json
-
-# Flash FPGA bitstream directly over JTAG via openFPGALoader
-python3 gemm_dashboard.py flash-bitstream --board basys3
-
-# Flash FPGA bitstream to non-volatile SPI flash
-python3 gemm_dashboard.py flash-bitstream --board basys3 --spi-flash
+python3 gemm_dashboard.py flash [binary] [--bin BIN] [--port PORT] [--baud BAUD] [--console] [--json]
 ```
+| Flag / Argument | Aliases | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `binary` | *(positional)* | `None` | Path to executable `.bin` file (e.g. `../DOOM-on-GEMMrv32/bin/demo_vga_doom.bin`) |
+| `--bin` | `-b` | `None` | Path to executable `.bin` file (named flag) |
+| `--port` | `-p` | `/dev/ttyUSB1` | Target UART device |
+| `--baud` | `-baude`, `--baude` | `19200` | Baud rate |
+| `--console` | `--open-console`, `-c`| `False` | Automatically launches interactive TUI monitor upon boot |
+| `--json` | | `False` | Output structured JSON results for scripts / CI |
+
+#### `--open-console` (or `console`) Subcommand
+```bash
+python3 gemm_dashboard.py --open-console [--port PORT] [-b BAUD]
+```
+| Flag / Argument | Aliases | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--port` | `-p` | `/dev/ttyUSB1` | Serial port to monitor |
+| `-b` | `--baud`, `--baude` | `19200` | Baud rate |
+
+#### TUI Console Keyboard Shortcuts
+| Key | Action |
+| :--- | :--- |
+| **Any Typed Key** | Streams directly to SoC UART with zero latency (e.g. WASD, Space, Enter) |
+| **`F3`** | Clears the terminal log screen |
+| **`F5`** | Reconnects the serial port |
+| **`PgUp` / `PgDn`** | Scrolls through terminal history buffer |
+| **`Ctrl+C`** | Cleanly exits the console and restores terminal state |
+
+#### `build` Subcommand
+```bash
+python3 gemm_dashboard.py build --project PROJECT [--opt OPT] [--output OUT] [--json]
+```
+| Flag / Argument | Aliases | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--project` | `-p` | *(Required)* | Project directory (e.g. `example/src/demo_gemm` or `../DOOM-on-GEMMrv32/src`) |
+| `--opt` | `-O` | `-O2` | Optimization level (`-O2`, `-Os`, `-O0`, `-O1`, `-O3`) |
+| `--output` | `-o` | `example/bin/<name>.bin` | Destination path for packed NEORV32 binary |
+| `--json` | | `False` | Output memory footprint metrics (IMEM, DMEM) as JSON |
 
 ---
 
