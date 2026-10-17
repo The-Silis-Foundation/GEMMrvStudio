@@ -2,5 +2,10 @@ __pycache__/
 *.pyc
 *.log
 build/
+dist/
+AppDir/
+*.AppImage
+packaging/appimagetool
+packaging/gemmrvstudio.png
 toolchain/riscv
 toolchain/bin

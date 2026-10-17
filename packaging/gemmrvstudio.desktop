@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=GEMMrvStudio
+GenericName=RISC-V & GEMM IDE
+Comment=Industrial RISC-V IDE & Systolic Accelerator Workbench
+Exec=gemm_dashboard
+Icon=gemmrvstudio
+Categories=Development;IDE;Electronics;
+Terminal=false
+StartupNotify=true

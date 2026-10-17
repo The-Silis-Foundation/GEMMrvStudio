@@ -86,7 +86,25 @@ sudo apt install -y python3-pyqt5 python3-pyqt5.qsci python3-pyqt5.qtsvg python3
 
 ## Usage Guide
 
-### 1. Launching the Graphical IDE
+### 1. Launching via Standalone AppImage (Zero Dependencies)
+Download or build the standalone AppImage, make it executable, and run directly:
+```bash
+chmod +x GEMMrvStudio-x86_64.AppImage
+
+# Launch Graphical IDE
+./GEMMrvStudio-x86_64.AppImage
+
+# Or run headless CLI commands directly
+./GEMMrvStudio-x86_64.AppImage flash demo_nn_inference.bin --port /dev/ttyUSB1 --console
+./GEMMrvStudio-x86_64.AppImage list-ports
+```
+
+To build a fresh AppImage package:
+```bash
+bash packaging/build_appimage.sh
+```
+
+### 2. Launching via Python Script
 ```bash
 python3 gemm_dashboard.py
 ```
